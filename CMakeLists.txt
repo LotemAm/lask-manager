@@ -23,6 +23,8 @@ add_executable(lask WIN32
   src/performance.cpp
   src/processes.cpp
   src/services.cpp
+  src/settings.cpp
+  src/shell.cpp
   src/servicestab.cpp
   src/snapshot.cpp
   src/theme.cpp

@@ -31,8 +31,17 @@ public:
     void applyTheme();
     void fontsChanged(); // dpi or system font changed
     LRESULT onNotify(NMHDR* h);
+    void graphsReset(); // the render mode changed
+
+    // Settings: the range in seconds and the logical-processor view survive restarts; the sample
+    // count across the graph follows the refresh interval.
+    void setView(int seconds, bool logical);
+    int seconds() const { return seconds_; }
+    bool logical() const { return logical_; }
+    void setInterval(unsigned ms);
 
 private:
+    int samples() const;
     static LRESULT CALLBACK DetailProc(HWND, UINT, WPARAM, LPARAM);
 
     const Panel* selected() const;
@@ -62,7 +71,8 @@ private:
 
     PanelKind selectedKind_ = PanelKind::Cpu; // the selection survives devices coming and going
     uint64_t selectedKey_ = 0;
-    int samples_ = 60;    // 30 s, 1 min or 5 min at one sample a second
+    int seconds_ = 60;        // 30 s, 1 min or 5 min
+    unsigned intervalMs_ = 1000;
     bool logical_ = false; // CPU: one graph per logical processor
 };
 

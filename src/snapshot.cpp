@@ -9,6 +9,9 @@
 #include <optional>
 #include <unordered_map>
 
+// Not in winternl.h; exported by ntdll since NT 4. Used only for our own I/O priority.
+extern "C" NTSTATUS NTAPI NtSetInformationProcess(HANDLE process, ULONG infoClass, PVOID info, ULONG length);
+
 namespace lask {
 namespace {
 
@@ -341,12 +344,36 @@ bool IsElevated() {
 }
 
 bool EnableDebugPrivilege() {
+    return EnablePrivilege(SE_DEBUG_NAME);
+}
+
+bool RaiseOwnIoPriority() {
+    constexpr ULONG kProcessIoPriority = 33;
+    ULONG high = 3; // IoPriorityHigh
+    return NtSetInformationProcess(GetCurrentProcess(), kProcessIoPriority, &high, sizeof high) >= 0;
+}
+
+DWORD SetProcessPriorityByIdentity(uint32_t pid, int64_t createTime, DWORD priorityClass) {
+    HANDLE h = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return GetLastError();
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (createTime != 0 && GetProcessTimes(h, &created, &exited, &kernel, &user) &&
+        ((static_cast<int64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime) != createTime) {
+        CloseHandle(h);
+        return ERROR_NOT_FOUND;
+    }
+    const DWORD err = SetPriorityClass(h, priorityClass) ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(h);
+    return err;
+}
+
+bool EnablePrivilege(const wchar_t* name) {
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) return false;
     TOKEN_PRIVILEGES tp{};
     tp.PrivilegeCount = 1;
     tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    bool ok = LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &tp.Privileges[0].Luid) != 0;
+    bool ok = LookupPrivilegeValueW(nullptr, name, &tp.Privileges[0].Luid) != 0;
     ok = ok && AdjustTokenPrivileges(token, FALSE, &tp, sizeof tp, nullptr, nullptr) && GetLastError() == ERROR_SUCCESS;
     CloseHandle(token);
     return ok;

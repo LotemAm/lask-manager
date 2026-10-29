@@ -11,7 +11,7 @@ freezes the sort while your mouse is down. The full reasoning is in [docs/design
 
 ## Status
 
-Milestones 1-6 of the design's build order:
+All seven milestones of the design's build order:
 
 - **Kill-only MVP.** Flat process grid, sort by any column, Delete ends the selected process,
   restart-as-administrator when Windows says no.
@@ -36,7 +36,37 @@ Milestones 1-6 of the design's build order:
   Start, Stop, Restart (with the UAC shield, and an offer to restart elevated and finish the action
   there when Windows says no), Go to details, Open Services.
 
-Milestone 7 (polish: settings, tray, replace Task Manager, release zip) is next; see the design doc.
+- **Polish.** Options (gear button, Ctrl+,): always on top; update speed 0.5 s / 1 s / 2 s /
+  paused; hardware-accelerated graphs (smoother, ~20 MB more memory); keep running in the
+  notification area (starts with Windows, Win+Shift+Esc shows it, closing hides it, sampling
+  pauses while hidden); replace Task Manager. Window position, tab, column widths and order, sort
+  and graph range are remembered. One instance: a second launch shows the running one. Set
+  priority on the Processes and Details menus. High I/O priority for itself when elevated.
+
+## Settings
+
+`%LOCALAPPDATA%\LaskManager\settings.json`, or `lask.json` next to `lask.exe` if that file exists
+(portable use: create an empty `{}` there). Delete it to get the defaults back.
+
+## Replace Task Manager
+
+Options > Replace Task Manager sets
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe`
+`Debugger` to this exe (administrator rights; you get a UAC prompt). Windows then starts Lask
+Manager for Ctrl+Shift+Esc, the Ctrl+Alt+Del screen and the taskbar menu. Turn it off before you
+move or delete `lask.exe`. To undo it by hand from an elevated prompt:
+
+```powershell
+reg delete "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe" /v Debugger /f
+```
+
+## Command line
+
+| Argument | Meaning |
+| --- | --- |
+| `--bench` | Print time to first paint and first rows (ms from process start), then exit |
+| `--tray` | Start hidden in the notification area (what "start with Windows" uses) |
+| `--kill <pid> --at <createtime>`, `--service <start\|stop\|restart> "<name>"`, `--replace-taskmgr on\|off` | Used by the elevated relaunch |
 
 ## Build
 
@@ -49,6 +79,7 @@ cmake --build --preset vs-release
 ```
 
 From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-release` is faster.
+`.\scripts\package.ps1` builds a release and writes the zip to `dist\` (no installer: copy the exe).
 
 ## Keyboard
 
@@ -58,10 +89,12 @@ From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-
 | F5 | Refresh now |
 | Ctrl+F | Filter by name, PID, user, description, path or command line |
 | Ctrl+Tab, Ctrl+1 ... Ctrl+4 | Next tab; Processes, Performance, Details, Services |
+| Ctrl+, | Options |
+| Win+Shift+Esc | Show or hide (when kept in the notification area) |
 | Right / Left | Expand / collapse an app row (Processes) |
 | Enter, double-click | Expand an app row, or switch to a window row (Processes) |
 | Tab | Move between the filter box and the grid |
-| Esc | Clear the filter; with no filter, close |
+| Esc | Clear the filter; with no filter, close (or hide, in the notification area) |
 | Typing | Jump to the next process whose name starts with what you typed |
 | Shift+F10 / Menu | Context menu |
 
@@ -75,6 +108,9 @@ src/graph.*       the Direct2D graph control (d2d1/dwrite loaded on first use)
 src/history.*     ring buffers and per-device panels, fed every tick on the UI thread
 src/counters.*    CPU, memory, disk, network and GPU counters, read by the sampler
 src/services.*    service list, per-service config fetch, start / stop / restart
+src/settings.*    the settings file (flat JSON)
+src/shell.*       tray icon, start with Windows, the "replace Task Manager" IFEO hook
+scripts/package.ps1  release zip
 src/servicestab.* Services tab: grid with status dots, sort, filter
 src/ui.*          shared grid chrome: fonts, dark header, accent selection, filter match
 src/snapshot.*    one NtQuerySystemInformation call per tick; sampler thread; terminate helpers

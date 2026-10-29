@@ -13,10 +13,10 @@
 
 namespace lask {
 
-// The last kCapacity samples of one series: 5 minutes at one sample a second.
+// The last kCapacity samples of one series.
 class Ring {
 public:
-    static constexpr int kCapacity = 300;
+    static constexpr int kCapacity = 600; // 5 minutes at the fastest refresh (0.5 s)
 
     void push(float value) {
         values_[head_] = value;

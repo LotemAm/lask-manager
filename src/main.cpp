@@ -10,6 +10,8 @@
 #include "performance.h"
 #include "processes.h"
 #include "services.h"
+#include "settings.h"
+#include "shell.h"
 #include "servicestab.h"
 #include "snapshot.h"
 #include "theme.h"
@@ -39,6 +41,13 @@ constexpr UINT kMsgKillDone = WM_APP + 2;
 constexpr UINT kMsgFacts = WM_APP + 3;
 constexpr UINT kMsgServiceConfigs = WM_APP + 4;
 constexpr UINT kMsgServiceDone = WM_APP + 5;
+constexpr UINT kMsgTray = WM_APP + 6;
+constexpr int kHotkeyShow = 1;            // Win+Shift+Esc in tray mode (Explorer owns Ctrl+Shift+Esc)
+constexpr int kOptionsId = 106;           // the gear button
+constexpr UINT kPriorityClasses[] = {REALTIME_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, ABOVE_NORMAL_PRIORITY_CLASS,
+                                     NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS};
+constexpr const wchar_t* kPriorityNames[] = {L"&Realtime", L"&High", L"&Above normal", L"&Normal", L"&Below normal", L"&Low"};
+constexpr int kPriorityBase[] = {24, 13, 10, 8, 6, 4}; // the base priority each class gives a process
 constexpr UINT_PTR kTimerDeferredAdopt = 1;
 constexpr int kListId = 100; // the Details grid
 constexpr int kFilterId = 101;
@@ -69,6 +78,18 @@ enum Command : int {
     kCmdServiceStop,
     kCmdServiceRestart,
     kCmdOpenServices,
+    kCmdOptions,
+    kCmdOnTop,
+    kCmdSpeedHigh,
+    kCmdSpeedNormal,
+    kCmdSpeedLow,
+    kCmdSpeedPaused,
+    kCmdHardwareGraphs,
+    kCmdTray,
+    kCmdReplaceTaskManager,
+    kCmdShow,
+    kCmdExit,
+    kCmdPriorityBase = 1080, // + index into kPriorityClasses
     kCmdColumnBase = 1100
 };
 
@@ -135,6 +156,7 @@ struct KillResult {
     uint32_t pid;
     int64_t createTime;
     DWORD error;
+    bool priority = false; // a Set priority result, not a kill
 };
 
 struct App {
@@ -142,6 +164,7 @@ struct App {
     HWND list = nullptr; // the Details grid; created the first time the tab is shown
     HWND filter = nullptr;
     HWND nav = nullptr;
+    HWND options = nullptr; // the gear button
     HIMAGELIST navRows = nullptr; // a 1-pixel-wide image list whose height sets the nav row height
     HBRUSH background = nullptr;
     HBRUSH surface = nullptr;
@@ -167,6 +190,14 @@ struct App {
     bool columnVisible[Index(Column::Count)] = {};
     int columnWidth[Index(Column::Count)] = {}; // at 96 dpi, remembered while a column is hidden
     bool menuOpen = false;
+    lask::Settings settings;
+    lask::TrayIcon tray;
+    UINT taskbarCreated = 0; // Explorer restarted: the tray icon has to be added again
+    UINT activateMessage = 0; // a second launch asks the running instance to show itself
+    bool exiting = false;     // WM_CLOSE really closes (tray mode otherwise only hides)
+    bool hidden = false;      // in the notification area; sampling is paused
+    bool bench = false;       // --bench: print startup times and exit
+    double benchPainted = 0;
     wchar_t filterText[128] = {};
     wchar_t text[160] = {}; // LVN_GETDISPINFO scratch; the control copies it before the next request
 };
@@ -349,6 +380,8 @@ bool IsInteracting() {
     return g.menuOpen || (GetKeyState(VK_LBUTTON) & 0x8000) || (GetKeyState(VK_RBUTTON) & 0x8000);
 }
 
+void OnBenchRows();
+
 void AdoptLatestSnapshot() {
     auto latest = g.sampler.latest();
     if (!latest || latest == g.current) return;
@@ -364,6 +397,7 @@ void AdoptLatestSnapshot() {
     g.performance.refresh();
     g.services.update(g.current->services);
     PublishWanted();
+    if (g.bench && !g.current->rows.empty()) OnBenchRows();
 }
 
 // A snapshot that lands while the mouse is down or a menu is open waits: the row under the cursor
@@ -665,6 +699,8 @@ void Layout() {
     ListView_SetColumnWidth(g.nav, 0, nav); // no column edge, so no separator line inside the nav
     SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 2 * pad)), editHeight,
                  SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(g.options, nullptr, static_cast<int>(rc.right) - pad - editHeight, pad, editHeight, editHeight,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
     for (HWND grid : {g.list, g.processes.grid(), g.services.grid()})
         if (grid)
             SetWindowPos(grid, nullptr, nav, bar, width, std::max(0, static_cast<int>(rc.bottom) - bar),
@@ -726,12 +762,30 @@ void CreateControls(HWND parent) {
                                0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFilterId)),
                                GetModuleHandleW(nullptr), nullptr);
     Edit_SetCueBannerTextFocused(g.filter, L"Filter: name, PID, user, description  (Ctrl+F)", TRUE);
+    g.options = CreateWindowExW(0, WC_BUTTONW, L"Options", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0,
+                                parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kOptionsId)), GetModuleHandleW(nullptr),
+                                nullptr);
 
+    // Details columns: the defaults, then whatever the settings file remembers.
+    const lask::Settings& s = g.settings;
     for (int i = 0; i < Index(Column::Count); ++i) {
         g.columnWidth[i] = kColumns[i].width;
         g.columnVisible[i] = kColumns[i].visible;
+        if (s.detailsWidths.size() == static_cast<size_t>(Column::Count) && s.detailsWidths[i] > 0)
+            g.columnWidth[i] = s.detailsWidths[i];
+    }
+    if (!s.detailsColumns.empty()) {
+        for (bool& v : g.columnVisible) v = false;
+        g.columnVisible[Index(Column::Name)] = true;
+        for (int c : s.detailsColumns)
+            if (c > 0 && c < Index(Column::Count)) g.columnVisible[c] = true;
+    }
+    if (s.detailsSort >= 0 && s.detailsSort < Index(Column::Count)) {
+        g.sortColumn = static_cast<Column>(s.detailsSort);
+        g.sortDescending = s.detailsDescending;
     }
     g.processes.create(parent, kProcessesId);
+    lask::SetGridLayout(g.processes.grid(), s.processesWidths, s.processesOrder, g.chrome.dpi);
     CreateNav(parent);
     SetGridImages();
     SetControlFonts();
@@ -743,8 +797,16 @@ void CreateControls(HWND parent) {
 void EnsureDetails() {
     if (g.list) return;
     g.list = lask::CreateGrid(g.hwnd, kListId, g.chrome);
-    for (int i = 0; i < Index(Column::Count); ++i)
-        if (g.columnVisible[i]) AppendColumn(static_cast<Column>(i));
+    // In the remembered display order (insertion order is display order), then any visible column
+    // the settings did not list.
+    AppendColumn(Column::Name);
+    for (int c : g.settings.detailsColumns)
+        if (c > 0 && c < Index(Column::Count) && g.columnVisible[c] &&
+            std::find(g.columns.begin(), g.columns.end(), static_cast<Column>(c)) == g.columns.end())
+            AppendColumn(static_cast<Column>(c));
+    for (int i = 1; i < Index(Column::Count); ++i)
+        if (g.columnVisible[i] && std::find(g.columns.begin(), g.columns.end(), static_cast<Column>(i)) == g.columns.end())
+            AppendColumn(static_cast<Column>(i));
     lask::ApplyGridTheme(g.list, g.chrome.theme);
     SetGridImages();
     UpdateSortArrows();
@@ -763,6 +825,7 @@ void EnsurePerformance() {
 void EnsureServices() {
     if (g.services.created()) return;
     g.services.create(g.hwnd, kServicesId, kMsgServiceConfigs);
+    lask::SetGridLayout(g.services.grid(), g.settings.servicesWidths, g.settings.servicesOrder, g.chrome.dpi);
     Layout();
     if (g.current) g.services.update(g.current->services);
 }
@@ -800,7 +863,10 @@ void RestartElevatedWith(const wchar_t* args) {
     sei.lpFile = exe;
     sei.lpParameters = args;
     sei.nShow = SW_SHOWNORMAL;
-    if (ShellExecuteExW(&sei)) PostMessageW(g.hwnd, WM_CLOSE, 0, 0); // hand over to the elevated instance
+    if (ShellExecuteExW(&sei)) {
+        g.exiting = true; // hand over to the elevated instance, even in tray mode
+        PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+    }
 }
 
 void RestartElevated(uint32_t killPid, int64_t killCreateTime) {
@@ -968,6 +1034,22 @@ void GoToDetails() {
 
 void OnKillDone(KillResult* result) {
     std::unique_ptr<KillResult> r(result);
+    if (r->priority) {
+        if (r->error == ERROR_SUCCESS || r->error == ERROR_NOT_FOUND) {
+            g.sampler.requestNow();
+        } else if (r->error == ERROR_ACCESS_DENIED && !g.elevated) {
+            if (MessageBoxW(g.hwnd, L"Windows denied access to this process.\n\nRestart Lask Manager as administrator?",
+                            L"Lask Manager", MB_YESNO | MB_ICONWARNING) == IDYES)
+                RestartElevated(0, 0);
+        } else {
+            wchar_t reason[256] = {}, message[400] = {};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, r->error, 0, reason,
+                           static_cast<DWORD>(std::size(reason)), nullptr);
+            swprintf_s(message, L"Could not change the priority of process %u.\n\n%s", r->pid, reason);
+            MessageBoxW(g.hwnd, message, L"Lask Manager", MB_OK | MB_ICONERROR);
+        }
+        return;
+    }
     if (r->error == ERROR_SUCCESS || r->error == ERROR_NOT_FOUND) {
         g.sampler.requestNow(); // the rows disappear with the next snapshot
         return;
@@ -1046,6 +1128,16 @@ void ShowContextMenu(HWND grid, LPARAM lp) {
     AppendMenuW(menu, MF_STRING | enabled, kCmdEndTask, L"&End task\tDel");
     AppendMenuW(menu, MF_STRING | enabled, kCmdEndTree, L"End process &tree");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    HMENU priority = CreatePopupMenu();
+    int current = -1;
+    if (target && g.current)
+        for (const auto& r : g.current->rows)
+            if (r.pid == target->process.pid && r.createTime == target->process.createTime)
+                for (int i = 0; i < static_cast<int>(std::size(kPriorityBase)); ++i)
+                    if (kPriorityBase[i] == r.basePriority) current = i;
+    for (int i = 0; i < static_cast<int>(std::size(kPriorityClasses)); ++i)
+        AppendMenuW(priority, MF_STRING | (i == current ? MF_CHECKED : 0), kCmdPriorityBase + i, kPriorityNames[i]);
+    AppendMenuW(menu, MF_POPUP | enabled, reinterpret_cast<UINT_PTR>(priority), L"Set &priority");
     AppendMenuW(menu, MF_STRING | enabled, kCmdOpenLocation, L"&Open file location");
     if (g.tab == Tab::Processes) AppendMenuW(menu, MF_STRING | enabled, kCmdGoToDetails, L"&Go to details");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -1154,7 +1246,244 @@ LRESULT OnNotify(NMHDR* h) {
     }
 }
 
+// ---- settings, options, tray ---------------------------------------------------------------------
+
+void CaptureSettings() {
+    lask::Settings& s = g.settings;
+    s.tab = static_cast<int>(g.tab);
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof wp;
+    if (!g.hidden && GetWindowPlacement(g.hwnd, &wp)) {
+        s.window = wp.rcNormalPosition;
+        s.hasWindow = true;
+        s.maximized = wp.showCmd == SW_SHOWMAXIMIZED;
+    }
+    s.graphSeconds = g.performance.seconds();
+    s.logicalProcessors = g.performance.logical();
+    s.detailsSort = Index(g.sortColumn);
+    s.detailsDescending = g.sortDescending;
+    if (g.list) {
+        s.detailsColumns.clear();
+        for (int i : lask::GridOrder(g.list)) s.detailsColumns.push_back(Index(g.columns[i]));
+        for (size_t i = 0; i < g.columns.size(); ++i)
+            g.columnWidth[Index(g.columns[i])] = MulDiv(ListView_GetColumnWidth(g.list, static_cast<int>(i)), 96,
+                                                        static_cast<int>(g.chrome.dpi));
+        s.detailsWidths.assign(std::begin(g.columnWidth), std::end(g.columnWidth));
+    }
+    s.processesWidths = lask::GridWidths(g.processes.grid(), g.chrome.dpi);
+    s.processesOrder = lask::GridOrder(g.processes.grid());
+    if (g.services.created()) {
+        s.servicesWidths = lask::GridWidths(g.services.grid(), g.chrome.dpi);
+        s.servicesOrder = lask::GridOrder(g.services.grid());
+    }
+}
+
+// Option changes are saved at once, off this thread; the exit save is the synchronous one.
+void SaveSettingsSoon() {
+    CaptureSettings();
+    std::thread([settings = g.settings] { lask::SaveSettings(settings); }).detach();
+}
+
+void UpdateTitle() {
+    std::wstring title = g.elevated ? L"Lask Manager (Administrator)" : L"Lask Manager";
+    if (g.settings.refreshMs == 0) title += L" — updates paused (F5 refreshes)";
+    SetWindowTextW(g.hwnd, title.c_str());
+}
+
+// Hidden in the tray means paused: nobody is looking, so nothing is sampled.
+void ApplyRefresh() {
+    const unsigned ms = g.settings.refreshMs;
+    g.sampler.setInterval(g.hidden || ms == 0 ? INFINITE : ms);
+    g.performance.setInterval(ms);
+    if (!g.hidden) g.sampler.requestNow(); // the new interval applies from the next wait
+    UpdateTitle();
+}
+
+void ApplyOnTop() {
+    SetWindowPos(g.hwnd, g.settings.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void ApplyTray() {
+    if (g.settings.tray) {
+        g.tray.show(g.hwnd, kMsgTray, LoadIconW(nullptr, IDI_APPLICATION), L"Lask Manager");
+        RegisterHotKey(g.hwnd, kHotkeyShow, MOD_WIN | MOD_SHIFT | MOD_NOREPEAT, VK_ESCAPE); // fails soft
+    } else {
+        g.tray.hide();
+        UnregisterHotKey(g.hwnd, kHotkeyShow);
+    }
+}
+
+void HideToTray() {
+    ShowWindow(g.hwnd, SW_HIDE);
+    g.hidden = true;
+    ApplyRefresh();
+}
+
+void ShowFromTray() {
+    const bool wasHidden = g.hidden;
+    g.hidden = false;
+    ShowWindow(g.hwnd, IsIconic(g.hwnd) ? SW_RESTORE : SW_SHOW);
+    SetForegroundWindow(g.hwnd);
+    if (wasHidden) ApplyRefresh(); // and a snapshot right away
+}
+
+void ShowTrayMenu(POINT pt) {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, kCmdShow, L"&Open Lask Manager");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdExit, L"E&xit");
+    SetMenuDefaultItem(menu, kCmdShow, FALSE);
+    SetForegroundWindow(g.hwnd); // or the menu does not close when clicking elsewhere
+    TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, g.hwnd, nullptr);
+    PostMessageW(g.hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
+void OnTrayEvent(WPARAM wp, LPARAM lp) {
+    switch (LOWORD(lp)) {
+    case NIN_SELECT:
+    case NIN_KEYSELECT:
+        if (g.hidden || GetForegroundWindow() != g.hwnd) ShowFromTray();
+        else HideToTray();
+        break;
+    case WM_CONTEXTMENU: ShowTrayMenu({GET_X_LPARAM(wp), GET_Y_LPARAM(wp)}); break;
+    default: break;
+    }
+}
+
+void ToggleReplaceTaskManager() {
+    const bool on = !lask::IsReplacingTaskManager();
+    if (on && MessageBoxW(g.hwnd,
+                          L"Windows will start Lask Manager instead of Task Manager: for Ctrl+Shift+Esc, from the "
+                          L"Ctrl+Alt+Del screen and from the taskbar.\n\n"
+                          L"If you move or delete lask.exe, turn this off first, or Task Manager will not open.\n\n"
+                          L"Continue?",
+                          L"Lask Manager", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
+        return;
+    if (!g.elevated) { // the IFEO key is under HKLM: the elevated instance makes the change
+        RestartElevatedWith(on ? L"--replace-taskmgr on" : L"--replace-taskmgr off");
+        return;
+    }
+    if (const DWORD error = lask::SetReplaceTaskManager(on)) {
+        wchar_t reason[256] = {};
+        FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0, reason,
+                       static_cast<DWORD>(std::size(reason)), nullptr);
+        MessageBoxW(g.hwnd, reason, L"Lask Manager", MB_OK | MB_ICONERROR);
+    }
+}
+
+void ShowOptionsMenu() {
+    RECT rc{};
+    GetWindowRect(g.options, &rc);
+    const lask::Settings& s = g.settings;
+    HMENU speed = CreatePopupMenu();
+    AppendMenuW(speed, MF_STRING, kCmdSpeedHigh, L"&High (0.5 s)");
+    AppendMenuW(speed, MF_STRING, kCmdSpeedNormal, L"&Normal (1 s)");
+    AppendMenuW(speed, MF_STRING, kCmdSpeedLow, L"&Low (2 s)");
+    AppendMenuW(speed, MF_STRING, kCmdSpeedPaused, L"&Paused");
+    const UINT checked = s.refreshMs == 0 ? kCmdSpeedPaused : s.refreshMs <= 500 ? kCmdSpeedHigh
+                       : s.refreshMs >= 2000 ? kCmdSpeedLow : kCmdSpeedNormal;
+    CheckMenuRadioItem(speed, kCmdSpeedHigh, kCmdSpeedPaused, checked, MF_BYCOMMAND);
+
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (s.alwaysOnTop ? MF_CHECKED : 0), kCmdOnTop, L"Always on &top");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(speed), L"&Update speed");
+    AppendMenuW(menu, MF_STRING | (s.hardwareGraphs ? MF_CHECKED : 0), kCmdHardwareGraphs,
+                L"&Hardware-accelerated graphs (uses more memory)");
+    AppendMenuW(menu, MF_STRING | (s.tray ? MF_CHECKED : 0), kCmdTray,
+                L"&Keep running in the notification area (Win+Shift+Esc)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (lask::IsReplacingTaskManager() ? MF_CHECKED : 0), kCmdReplaceTaskManager,
+                L"&Replace Task Manager");
+    HBITMAP shield = g.elevated ? nullptr : lask::CreateShieldBitmap(GetSystemMetricsForDpi(SM_CXSMICON, g.chrome.dpi));
+    if (shield) {
+        MENUITEMINFOW mii{};
+        mii.cbSize = sizeof mii;
+        mii.fMask = MIIM_BITMAP;
+        mii.hbmpItem = shield;
+        SetMenuItemInfoW(menu, kCmdReplaceTaskManager, FALSE, &mii);
+        AppendMenuW(menu, MF_STRING, kCmdRestartAdmin, L"Restart as &administrator");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdExit, L"E&xit");
+
+    g.menuOpen = true;
+    TrackPopupMenuEx(menu, TPM_RIGHTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, rc.right, rc.bottom, g.hwnd, nullptr);
+    g.menuOpen = false;
+    DestroyMenu(menu);
+    if (shield) DeleteObject(shield);
+}
+
+void OnOptionCommand(WORD id) {
+    lask::Settings& s = g.settings;
+    switch (id) {
+    case kCmdOnTop:
+        s.alwaysOnTop = !s.alwaysOnTop;
+        ApplyOnTop();
+        break;
+    case kCmdSpeedHigh: s.refreshMs = 500; ApplyRefresh(); break;
+    case kCmdSpeedNormal: s.refreshMs = 1000; ApplyRefresh(); break;
+    case kCmdSpeedLow: s.refreshMs = 2000; ApplyRefresh(); break;
+    case kCmdSpeedPaused: s.refreshMs = 0; ApplyRefresh(); break;
+    case kCmdHardwareGraphs:
+        s.hardwareGraphs = !s.hardwareGraphs;
+        lask::SetHardwareGraphs(s.hardwareGraphs);
+        g.performance.graphsReset();
+        break;
+    case kCmdTray:
+        s.tray = !s.tray;
+        lask::SetStartWithWindows(s.tray); // resident only makes sense if it is already running
+        ApplyTray();
+        break;
+    case kCmdReplaceTaskManager: ToggleReplaceTaskManager(); return;
+    default: return;
+    }
+    SaveSettingsSoon();
+}
+
+void SetSelectedPriority(int index) {
+    const auto target = SelectedTarget();
+    if (!target || index < 0 || index >= static_cast<int>(std::size(kPriorityClasses))) return;
+    if (kPriorityClasses[index] == REALTIME_PRIORITY_CLASS &&
+        MessageBoxW(g.hwnd, L"Realtime priority can make the whole system unresponsive.\n\nSet it anyway?",
+                    L"Lask Manager", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES)
+        return;
+    HWND hwnd = g.hwnd;
+    std::thread([id = target->process, priorityClass = kPriorityClasses[index], hwnd] {
+        auto* result = new KillResult{id.pid, id.createTime, lask::SetProcessPriorityByIdentity(id.pid, id.createTime, priorityClass), true};
+        if (!PostMessageW(hwnd, kMsgKillDone, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
+}
+
+// --bench: the startup numbers the design asks to watch, on stdout (works with redirection),
+// then exit. Times are from process creation.
+double MsSinceProcessStart() {
+    FILETIME created{}, exited{}, kernel{}, user{}, now{};
+    GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+    GetSystemTimePreciseAsFileTime(&now);
+    const auto ticks = [](const FILETIME& f) { return (static_cast<int64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
+    return static_cast<double>(ticks(now) - ticks(created)) / 10'000.0;
+}
+
+void OnBenchRows() {
+    g.bench = false;
+    char line[160];
+    const int n = sprintf_s(line, "first-paint-ms=%.1f first-rows-ms=%.1f processes=%zu\r\n", g.benchPainted,
+                            MsSinceProcessStart(), g.current->rows.size());
+    AttachConsole(ATTACH_PARENT_PROCESS);
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD written = 0;
+    if (out && out != INVALID_HANDLE_VALUE && n > 0) WriteFile(out, line, static_cast<DWORD>(n), &written, nullptr);
+    g.exiting = true;
+    PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+}
+
 void OnCommand(WORD id) {
+    if (id >= kCmdPriorityBase && id < kCmdPriorityBase + std::size(kPriorityClasses)) {
+        SetSelectedPriority(id - kCmdPriorityBase);
+        return;
+    }
     switch (id) {
     case kCmdEndTask: EndSelectedTask(); break;
     case kCmdEndTree: EndSelectedTree(); break;
@@ -1179,6 +1508,20 @@ void OnCommand(WORD id) {
     case kCmdServiceStop: OnServiceCommand(lask::ServiceAction::Stop); break;
     case kCmdServiceRestart: OnServiceCommand(lask::ServiceAction::Restart); break;
     case kCmdOpenServices: OpenServicesConsole(); break;
+    case kCmdOptions: ShowOptionsMenu(); break;
+    case kCmdShow: ShowFromTray(); break;
+    case kCmdExit:
+        g.exiting = true;
+        DestroyWindow(g.hwnd);
+        break;
+    case kCmdOnTop:
+    case kCmdSpeedHigh:
+    case kCmdSpeedNormal:
+    case kCmdSpeedLow:
+    case kCmdSpeedPaused:
+    case kCmdHardwareGraphs:
+    case kCmdTray:
+    case kCmdReplaceTaskManager: OnOptionCommand(id); break;
     case kCmdRestartAdmin: RestartElevated(0, 0); break;
     default:
         if (id > kCmdColumnBase && id < kCmdColumnBase + Index(Column::Count))
@@ -1193,10 +1536,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.hwnd = hwnd;
         // The first snapshot is taken while the window is built; its message is only handled once
         // the message loop runs, after the empty grid has been painted.
-        g.sampler.start(hwnd, kMsgSnapshot, kDefaultIntervalMs);
+        g.sampler.start(hwnd, kMsgSnapshot, g.settings.refreshMs ? g.settings.refreshMs : INFINITE);
         CreateControls(hwnd);
         SetWindowSubclass(g.filter, FilterSubclassProc, 1, 0);
-        ShowTab(Tab::Processes);
+        ShowTab(g.settings.tab >= 0 && g.settings.tab < static_cast<int>(Tab::Count) ? static_cast<Tab>(g.settings.tab)
+                                                                                     : Tab::Processes);
         return 0;
     case WM_SIZE:
         if (g.nav) Layout();
@@ -1216,8 +1560,35 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == EN_CHANGE) OnFilterChanged();
             return 0;
         }
+        if (LOWORD(wp) == kOptionsId) {
+            ShowOptionsMenu();
+            return 0;
+        }
         OnCommand(LOWORD(wp));
         return 0;
+    case WM_DRAWITEM: {
+        // The gear button: a Fluent glyph on the bar's own background, a soft fill on hover / press.
+        const auto* di = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+        if (di->CtlID != kOptionsId) return FALSE;
+        const lask::Theme& theme = g.chrome.theme;
+        lask::FillSolid(di->hDC, di->rcItem, theme.background);
+        if (di->itemState & (ODS_SELECTED | ODS_HOTLIGHT | ODS_FOCUS))
+            lask::RoundFill(di->hDC, di->rcItem, Scale(6), (di->itemState & ODS_SELECTED) ? theme.headerPressed : theme.headerHot);
+        SetBkMode(di->hDC, TRANSPARENT);
+        SetTextColor(di->hDC, theme.text);
+        HGDIOBJ old = SelectObject(di->hDC, g.chrome.glyphs);
+        RECT rc = di->rcItem;
+        DrawTextW(di->hDC, L"\xE713", 1, &rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        SelectObject(di->hDC, old);
+        return TRUE;
+    }
+    case WM_HOTKEY:
+        if (wp == kHotkeyShow) {
+            if (g.hidden || GetForegroundWindow() != hwnd) ShowFromTray();
+            else HideToTray();
+        }
+        return 0;
+    case kMsgTray: OnTrayEvent(wp, lp); return 0;
     case WM_CTLCOLOREDIT:
         if (reinterpret_cast<HWND>(lp) == g.filter) {
             HDC dc = reinterpret_cast<HDC>(wp);
@@ -1254,13 +1625,28 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ApplyTheme();
         return 0;
     case WM_DPICHANGED: OnDpiChanged(HIWORD(wp), *reinterpret_cast<const RECT*>(lp)); return 0;
-    case WM_CLOSE: DestroyWindow(hwnd); return 0;
+    case WM_CLOSE:
+        if (g.settings.tray && !g.exiting) HideToTray(); // Esc and the close button keep it warm
+        else DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
+        CaptureSettings();
+        lask::SaveSettings(g.settings); // the window is gone; nobody waits on this
+        g.tray.hide();
         g.enricher.stop();
         g.sampler.stop();
         PostQuitMessage(0);
         return 0;
-    default: return DefWindowProcW(hwnd, msg, wp, lp);
+    default:
+        if (msg == g.taskbarCreated && g.settings.tray) {
+            ApplyTray(); // Explorer restarted and lost our icon
+            return 0;
+        }
+        if (msg == g.activateMessage) { // a second launch: show this instance instead
+            ShowFromTray();
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
 
@@ -1282,6 +1668,9 @@ void BoostOwnPriority() {
     SetProcessInformation(process, ProcessMemoryPriority, &memoryPriority, sizeof memoryPriority);
 
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    // Our own page-ins should win against a disk-bound hog. Needs SeIncreaseBasePriorityPrivilege
+    // (elevated); silently stays normal otherwise.
+    lask::RaiseOwnIoPriority();
 }
 
 struct Options {
@@ -1289,6 +1678,9 @@ struct Options {
     int64_t killCreateTime = 0;
     std::optional<lask::ServiceAction> serviceAction; // --service <start|stop|restart> <name>
     std::wstring serviceName;
+    std::optional<bool> replaceTaskManager; // --replace-taskmgr on|off (the elevated relaunch)
+    bool tray = false;                      // --tray: started with Windows, stay hidden
+    bool bench = false;                     // --bench
 };
 
 // "--kill <pid> --at <createtime>" is what the elevated relaunch passes. Anything else (such as the
@@ -1298,8 +1690,12 @@ Options ParseCommandLine() {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) return o;
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (wcscmp(argv[i], L"--kill") == 0) o.killPid = wcstoul(argv[i + 1], nullptr, 10);
+    for (int i = 1; i < argc; ++i) {
+        if (wcscmp(argv[i], L"--tray") == 0) o.tray = true;
+        else if (wcscmp(argv[i], L"--bench") == 0) o.bench = true;
+        if (i + 1 >= argc) break;
+        if (wcscmp(argv[i], L"--replace-taskmgr") == 0) o.replaceTaskManager = wcscmp(argv[i + 1], L"on") == 0;
+        else if (wcscmp(argv[i], L"--kill") == 0) o.killPid = wcstoul(argv[i + 1], nullptr, 10);
         else if (wcscmp(argv[i], L"--at") == 0) o.killCreateTime = _wcstoi64(argv[i + 1], nullptr, 10);
         else if (wcscmp(argv[i], L"--service") == 0 && i + 2 < argc) {
             if (wcscmp(argv[i + 1], L"start") == 0) o.serviceAction = lask::ServiceAction::Start;
@@ -1315,12 +1711,37 @@ Options ParseCommandLine() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
-    BoostOwnPriority();
     g.elevated = lask::IsElevated();
-    if (g.elevated) lask::EnableDebugPrivilege();
+    if (g.elevated) {
+        lask::EnableDebugPrivilege();
+        lask::EnablePrivilege(SE_INC_BASE_PRIORITY_NAME); // Set priority: High / Realtime; our I/O priority
+    }
+    BoostOwnPriority();
 
     const Options options = ParseCommandLine();
     if (options.killPid) lask::TerminateProcessByIdentity(options.killPid, options.killCreateTime);
+    if (options.replaceTaskManager && g.elevated) lask::SetReplaceTaskManager(*options.replaceTaskManager);
+
+    // One instance: a second launch (Ctrl+Shift+Esc through IFEO, the Start menu) shows the one that
+    // is already running, which is instant in tray mode. Elevated hand-overs and --bench always run.
+    g.activateMessage = RegisterWindowMessageW(L"LaskManager.Activate");
+    const bool handover = options.killPid || options.serviceAction || options.replaceTaskManager || options.bench;
+    if (!handover)
+        if (HWND running = FindWindowW(L"LaskManager.Main", nullptr)) {
+            if (!options.tray) {
+                DWORD pid = 0;
+                GetWindowThreadProcessId(running, &pid);
+                AllowSetForegroundWindow(pid);
+                PostMessageW(running, g.activateMessage, 0, 0);
+            }
+            return 0;
+        }
+    g.bench = options.bench;
+    lask::LoadSettings(g.settings);
+    if (options.bench) g.settings.tray = false; // never hide, never stay
+    lask::SetHardwareGraphs(g.settings.hardwareGraphs);
+    g.performance.setView(g.settings.graphSeconds, g.settings.logicalProcessors);
+    g.performance.setInterval(g.settings.refreshMs);
 
     INITCOMMONCONTROLSEX icc{sizeof icc, ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
@@ -1346,8 +1767,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, Scale(1120),
                                 Scale(680), nullptr, nullptr, instance, nullptr);
     if (!hwnd) return 1;
-    ShowWindow(hwnd, showCommand);
-    UpdateWindow(hwnd); // the empty grid is on screen before the first snapshot is handled
+    // A medium-integrity second launch must be able to wake an elevated instance.
+    ChangeWindowMessageFilterEx(hwnd, g.activateMessage, MSGFLT_ALLOW, nullptr);
+    g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+    // Where it was last time, if that is still on a monitor.
+    const lask::Settings& s = g.settings;
+    if (s.hasWindow && MonitorFromRect(&s.window, MONITOR_DEFAULTTONULL)) {
+        WINDOWPLACEMENT wp{};
+        wp.length = sizeof wp;
+        wp.showCmd = SW_HIDE;
+        wp.rcNormalPosition = s.window;
+        SetWindowPlacement(hwnd, &wp);
+    }
+    if (s.alwaysOnTop) ApplyOnTop();
+    ApplyTray();
+    UpdateTitle();
+    if (options.tray && s.tray) {
+        HideToTray(); // started with Windows: resident, invisible, not sampling
+    } else {
+        ShowWindow(hwnd, s.hasWindow && s.maximized ? SW_SHOWMAXIMIZED : showCommand);
+        UpdateWindow(hwnd); // the empty grid is on screen before the first snapshot is handled
+        if (g.bench) g.benchPainted = MsSinceProcessStart();
+    }
     // The elevated relaunch after "access denied" on a service: do what was asked, on a worker,
     // with the Services tab showing so the result is visible.
     if (options.serviceAction && !options.serviceName.empty()) {
@@ -1364,6 +1806,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         {FVIRTKEY | FCONTROL, '2', kCmdTabPerformance},
         {FVIRTKEY | FCONTROL, '3', kCmdTabDetails},
         {FVIRTKEY | FCONTROL, '4', kCmdTabServices},
+        {FVIRTKEY | FCONTROL, VK_OEM_COMMA, kCmdOptions},
     };
     HACCEL accel = CreateAcceleratorTableW(const_cast<ACCEL*>(accelerators), static_cast<int>(std::size(accelerators)));
 

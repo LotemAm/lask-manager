@@ -26,6 +26,10 @@ struct GraphData {
     std::wstring topLeft, topRight, bottomLeft, bottomRight;
 };
 
+// Software rendering by default; hardware loads the GPU driver (~20 MB) for smoother drawing.
+// Existing graphs pick the change up after reset().
+void SetHardwareGraphs(bool hardware);
+
 class Graph {
 public:
     Graph() = default;
@@ -38,6 +42,7 @@ public:
     HWND hwnd() const { return hwnd_; }
     void set(GraphData data); // invalidates; the window repaints from the rings on WM_PAINT
     void themeChanged();      // drops the text format so the next paint picks up the new dpi
+    void reset();             // drops the render target too: after SetHardwareGraphs
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);

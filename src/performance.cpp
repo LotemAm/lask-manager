@@ -65,8 +65,8 @@ double NiceCeiling(double value, double floor) {
     return 10.0 * power;
 }
 
-std::wstring RangeLabel(int samples) {
-    return samples <= 30 ? L"30 seconds" : samples <= 60 ? L"60 seconds" : L"5 minutes";
+std::wstring RangeLabel(int seconds) {
+    return seconds <= 30 ? L"30 seconds" : seconds <= 60 ? L"60 seconds" : L"5 minutes";
 }
 
 } // namespace
@@ -187,12 +187,33 @@ void PerformanceTab::refresh() {
     InvalidateRect(detail_, nullptr, FALSE);
 }
 
+int PerformanceTab::samples() const {
+    return std::clamp(static_cast<int>(seconds_ * 1000 / std::max(intervalMs_, 1u)), 2, Ring::kCapacity);
+}
+
+void PerformanceTab::setView(int seconds, bool logical) {
+    seconds_ = seconds <= 30 ? 30 : seconds <= 60 ? 60 : 300;
+    logical_ = logical;
+    if (list_) updateGraphs();
+}
+
+// Paused (0) keeps the last interval, so the graphs keep their scale.
+void PerformanceTab::setInterval(unsigned ms) {
+    if (ms) intervalMs_ = ms;
+    if (list_) updateGraphs();
+}
+
+void PerformanceTab::graphsReset() {
+    for (Graph& g : graphs_) g.reset();
+}
+
 void PerformanceTab::updateGraphs() {
     const Panel* p = selected();
     const Machine* m = model_.machine();
     GraphData a, b;
+    const int samples_ = samples();
     a.samples = b.samples = samples_;
-    a.bottomLeft = b.bottomLeft = RangeLabel(samples_);
+    a.bottomLeft = b.bottomLeft = RangeLabel(seconds_);
     a.bottomRight = b.bottomRight = L"0";
     int count = 1;
     if (p && m) {
@@ -519,7 +540,7 @@ void PerformanceTab::showMenu(POINT screen) {
     AppendMenuW(menu, MF_STRING, kMenu30s, L"30 seconds");
     AppendMenuW(menu, MF_STRING, kMenu60s, L"1 minute");
     AppendMenuW(menu, MF_STRING, kMenu300s, L"5 minutes");
-    CheckMenuRadioItem(menu, kMenu30s, kMenu300s, samples_ <= 30 ? kMenu30s : samples_ <= 60 ? kMenu60s : kMenu300s, MF_BYCOMMAND);
+    CheckMenuRadioItem(menu, kMenu30s, kMenu300s, seconds_ <= 30 ? kMenu30s : seconds_ <= 60 ? kMenu60s : kMenu300s, MF_BYCOMMAND);
     if (p && p->kind == PanelKind::Cpu) {
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuOverall, L"Overall utilization");
@@ -529,9 +550,9 @@ void PerformanceTab::showMenu(POINT screen) {
     const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, detail_, nullptr));
     DestroyMenu(menu);
     switch (cmd) {
-    case kMenu30s: samples_ = 30; break;
-    case kMenu60s: samples_ = 60; break;
-    case kMenu300s: samples_ = Ring::kCapacity; break;
+    case kMenu30s: seconds_ = 30; break;
+    case kMenu60s: seconds_ = 60; break;
+    case kMenu300s: seconds_ = 300; break;
     case kMenuOverall: logical_ = false; break;
     case kMenuLogical: logical_ = true; break;
     default: return;

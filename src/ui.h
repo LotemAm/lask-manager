@@ -57,6 +57,12 @@ bool MatchesFilter(const ProcessRow& row, const ProcessFacts* facts, const wchar
 
 void FormatMemory(uint64_t bytes, wchar_t* out, size_t count);
 
+// Column widths (at 96 dpi) and display order of a grid whose columns never change, for the
+// settings file. Setting ignores lists of the wrong length (a version with other columns).
+std::vector<int> GridWidths(HWND grid, UINT dpi);
+std::vector<int> GridOrder(HWND grid);
+void SetGridLayout(HWND grid, const std::vector<int>& widths, const std::vector<int>& order, UINT dpi);
+
 // The UAC shield as a 32-bit menu bitmap (MENUITEMINFO::hbmpItem); the caller deletes it.
 HBITMAP CreateShieldBitmap(int size);
 

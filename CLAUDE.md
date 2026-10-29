@@ -2,8 +2,8 @@
 
 Lightweight Task Manager replacement for Windows (`lask.exe`). C++23, raw Win32 + common controls,
 CMake, MSVC. The design is `docs/design.md`; read it before changing architecture. The milestone
-order is in its "Build order" section; milestones 1-6 (kill-only MVP, theme, enrichment, Processes,
-Performance and Services tabs) are done and milestone 7 (polish) is next.
+order is in its "Build order" section; all seven milestones are done. What is left is listed under
+"Not yet done" at the end of this file.
 
 ## Build and run
 
@@ -18,6 +18,13 @@ accepts `/std:c++23`. Static CRT. Warnings at /W4; keep the build warning-free.
 
 If `cmake --preset vs` says the VS instance "is not known to the Visual Studio Installer", an
 installer update is running; build from `vcvars64.bat` with `cmake --preset ninja` meanwhile.
+
+`lask.exe --bench` prints `first-paint-ms=… first-rows-ms=…` (from process creation) and exits;
+`scripts\package.ps1 [-Preset ninja]` builds, benches and writes `dist\LaskManager-<ver>-x64.zip`.
+
+Testing: put a `lask.json` (`{}` is enough) next to the exe under test. That is portable mode: the
+settings go there instead of `%LOCALAPPDATA%\LaskManager\settings.json`, so tests never touch the
+user's real settings. Remove it afterwards. A test that closes the app normally saves settings.
 
 ## Invariants (do not break these)
 
@@ -42,9 +49,16 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   description, delayed / trigger start) are fetched once per service name on a detached
   below-normal thread (`LoadServiceConfigs`), not on the enrichment thread: they are keyed by
   name, not by process identity. Start / stop / restart run on throwaway workers.
-- Elevation relaunch arguments: `--kill <pid> --at <createtime>` and
-  `--service <start|stop|restart> "<name>"`; the service action runs on a worker after the first
-  paint, with the Services tab showing.
+- Elevation relaunch arguments: `--kill <pid> --at <createtime>`,
+  `--service <start|stop|restart> "<name>"` (runs on a worker after the first paint, with the
+  Services tab showing) and `--replace-taskmgr on|off` (writes the IFEO key, then runs normally).
+  `RestartElevatedWith` sets `exiting` so the old instance really closes, even in tray mode.
+- One instance: a launch without those arguments (or `--bench`) finds `LaskManager.Main`, posts the
+  registered `LaskManager.Activate` message and exits. The elevated instance allows that message
+  through UIPI. Under IFEO this is how Ctrl+Shift+Esc reaches a running (tray) instance.
+- Settings: read once before the window exists (one small file), saved synchronously in
+  `WM_DESTROY` and on a detached worker after each option change. Hidden in the tray means
+  paused: the sampler waits `INFINITE` until the window is shown (or F5).
 - A process is identified by `(pid, createTime)`, never by pid alone. Kills verify the create time.
 - Snapshots are immutable once published (`std::atomic<std::shared_ptr<const Snapshot>>`). The UI
   keeps the newest and the previous one; rates are `(current - previous) / elapsed`.
@@ -56,7 +70,9 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   iphlpapi/powrprof (counters.cpp) are `LoadLibraryEx`'d on first use, and gdi32's D3DKMT
   functions are looked up with `GetProcAddress` so a missing export fails soft. Check with
   `dumpbin /dependents` after adding a library.
-- Manifest stays `asInvoker`. Elevation is a relaunch with `--kill <pid> --at <createtime>`.
+- Manifest stays `asInvoker`. Elevation is always a relaunch (see the arguments above). Elevated,
+  we enable SeDebugPrivilege and SeIncreaseBasePriorityPrivilege, which also lets
+  `RaiseOwnIoPriority` set our own I/O priority to High (it fails soft unelevated).
 - Undocumented calls (NT structs and info classes in `snapshot.cpp`, uxtheme ordinals in
   `theme.cpp`) stay isolated in those two files and fail soft. `facts.cpp` reaches the NT ones only
   through `QueryCommandLine` / `QueryImageNtPath`.
@@ -71,9 +87,10 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   and the per-device panels, UI side), `facts.*` (lazy per-process facts, enrichment thread,
   UI-side `FactCache`), `theme.*` (look), `ui.*` (what every grid shares: `Chrome` fonts + palette,
   the dark header, accent selection, filter match), `graph.*` (the Direct2D graph control),
-  `services.*` (service list, configs, actions), `processes.*`, `performance.*` and
-  `servicestab.*` (tabs), `main.cpp` (window, nav, Details tab, actions). New tabs get their own
-  file, as a class that holds a `const Chrome&`.
+  `services.*` (service list, configs, actions), `settings.*` (the JSON settings file), `shell.*`
+  (tray icon, start with Windows, the IFEO hook), `processes.*`, `performance.*` and
+  `servicestab.*` (tabs), `main.cpp` (window, nav, Details tab, options, actions). New tabs get
+  their own file, as a class that holds a `const Chrome&`.
 - Namespace `lask`. `g` in main.cpp is the single UI-thread state object; nothing else touches it.
   Tabs get what they need by reference at construction (`Chrome`, `FactCache`, the filter buffer).
 - Every tab rebuilds on every tick, visible or not, so no tab ever holds a `FactEntry*` across a
@@ -109,8 +126,11 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 - `Process.CloseMainWindow()` in a test script closes a message box, not the app, if one is up: a
   test that hangs on exit usually means the app showed an error.
 - A Direct2D hardware render target loads the GPU vendor's user-mode driver: +20 MB working set
-  for a few graphs. The graphs use `D2D1_RENDER_TARGET_TYPE_SOFTWARE` by default; hardware
-  rendering is to become a user setting (see "Not yet done").
+  for a few graphs (34 -> 58 MB measured). Software is the default; "Hardware-accelerated graphs"
+  in the options menu switches (`SetHardwareGraphs` + `Graph::reset()`). Switching back does not
+  give the memory back until restart: the driver DLLs stay loaded.
+- Explorer owns the Ctrl+Shift+Esc hotkey (`RegisterHotKey` fails with 1409). Ctrl+Shift+Esc
+  reaches us only through the IFEO hook; the tray hotkey is Win+Shift+Esc.
 - `fopen_s` opens exclusively: two instrumentation sinks writing one trace file lose one of them.
 - Testing service actions: pick a service whose DACL gives `RP` (start) only to SY/BA (`sc sdshow`),
   e.g. ALG. Many manual services (TapiSrv) let interactive users start them, so an "expect access
@@ -129,7 +149,9 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   arrives and puts it under Windows processes.
 - Working set is ~23 MB with ~970 processes (design target: 20 MB at 400), ~35 MB once the
   Performance tab has loaded Direct2D. Startup to first rows is ~10-15 ms slower than milestone 1
-  because the first screen now has two ListViews (grid + nav).
+  because the first screen now has two ListViews (grid + nav). Restoring the Performance tab as
+  the last-used tab loads Direct2D at startup.
+- The tray icon and the window use the stock application icon; there is no app icon yet.
 - Per tick at ~950 processes / 13k threads: the process snapshot is ~7 ms on the sampler (the design
   assumed ~1 ms at 400), counters ~1.6 ms (2 ms with details), UI work ~1 ms. Idle CPU measures
   1.5-3% of one core on this machine; the design target is 0.5% at 400 processes.
@@ -137,13 +159,8 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 
 ## Not yet done (from the design)
 
-Settings (milestone 7) must include a "hardware-accelerated graphs" option: Direct2D
-`D2D1_RENDER_TARGET_TYPE_DEFAULT` (GPU, ~20 MB more working set) instead of the software default;
-the switch is one line in `Graph::ensureTarget()` plus releasing existing targets.
-
-
-GPU column (per process), Properties, "Go to services" from a process, stopping dependent services, column layout persistence, Processes column picker,
-memory composition bar and SMBIOS slot/speed details, per-process network (ETW),
-"Not responding" on the Details tab (window info is only gathered while Processes is visible),
-tray-resident mode, IFEO "replace Task Manager" option, `--bench` flag, I/O priority boost via
-`NtSetInformationProcess(ProcessIoPriority)`.
+GPU column (per process), Set affinity, Properties, "Go to services" from a process, stopping
+dependent services, Processes column picker, memory composition bar and SMBIOS slot/speed details,
+per-process network (ETW), "Not responding" on the Details tab (window info is only gathered while
+Processes is visible), UWP app mapping, an app icon, code signing (the design's antivirus
+mitigation), running `--bench` under load in CI.

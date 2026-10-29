@@ -257,6 +257,36 @@ HBITMAP CreateShieldBitmap(int size) {
     return bitmap;
 }
 
+std::vector<int> GridWidths(HWND grid, UINT dpi) {
+    std::vector<int> widths;
+    if (!grid) return widths;
+    for (int i = 0, n = Header_GetItemCount(ListView_GetHeader(grid)); i < n; ++i)
+        widths.push_back(MulDiv(ListView_GetColumnWidth(grid, i), 96, static_cast<int>(dpi)));
+    return widths;
+}
+
+std::vector<int> GridOrder(HWND grid) {
+    if (!grid) return {};
+    std::vector<int> order(static_cast<size_t>(Header_GetItemCount(ListView_GetHeader(grid))));
+    ListView_GetColumnOrderArray(grid, static_cast<int>(order.size()), order.data());
+    return order;
+}
+
+void SetGridLayout(HWND grid, const std::vector<int>& widths, const std::vector<int>& order, UINT dpi) {
+    if (!grid) return;
+    const int n = Header_GetItemCount(ListView_GetHeader(grid));
+    if (static_cast<int>(widths.size()) == n)
+        for (int i = 0; i < n; ++i)
+            if (widths[i] > 0) ListView_SetColumnWidth(grid, i, MulDiv(widths[i], static_cast<int>(dpi), 96));
+    if (static_cast<int>(order.size()) == n) {
+        std::vector<int> sorted = order;
+        std::sort(sorted.begin(), sorted.end());
+        for (int i = 0; i < n; ++i)
+            if (sorted[i] != i) return; // not a permutation: leave the default order
+        ListView_SetColumnOrderArray(grid, n, const_cast<int*>(order.data()));
+    }
+}
+
 void SwitchToWindow(HWND window) {
     if (!IsWindow(window)) return;
     if (IsIconic(window)) ShowWindowAsync(window, SW_RESTORE);

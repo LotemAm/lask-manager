@@ -23,3 +23,6 @@ CMakeUserPresets.json
 # OS noise
 Thumbs.db
 desktop.ini
+
+# Release zips (scripts/package.ps1)
+dist/

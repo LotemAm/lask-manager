@@ -129,7 +129,17 @@ DWORD TerminateProcessByIdentity(uint32_t pid, int64_t createTime, DWORD waitMs 
 DWORD TerminateTree(const Snapshot& snapshot, Identity root, Identity& failed);
 
 bool IsElevated();
-bool EnableDebugPrivilege(); // only succeeds when elevated; lets us end other users' processes
+// Only succeed when elevated. SeDebugPrivilege lets us end other users' processes;
+// SeIncreaseBasePriorityPrivilege allows "High" I/O priority and the Realtime priority class.
+bool EnablePrivilege(const wchar_t* name);
+bool EnableDebugPrivilege();
+
+// High I/O priority for our own page-ins against a disk-bound hog (NtSetInformationProcess,
+// ProcessIoPriority). Needs SeIncreaseBasePriorityPrivilege; fails soft unelevated.
+bool RaiseOwnIoPriority();
+
+// Verifies the identity, then SetPriorityClass. Returns 0, ERROR_NOT_FOUND or a Win32 error.
+DWORD SetProcessPriorityByIdentity(uint32_t pid, int64_t createTime, DWORD priorityClass);
 
 // Lazy per-process queries for the enrichment thread; never on the per-tick path.
 // Command line through ProcessCommandLineInformation (Windows 8.1+; PROCESS_QUERY_LIMITED_INFORMATION).

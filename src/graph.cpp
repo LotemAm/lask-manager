@@ -11,6 +11,7 @@ namespace {
 
 constexpr wchar_t kClass[] = L"LaskManager.Graph";
 constexpr float kFillAlpha = 0.18f; // the area under the line: the line color, mostly transparent
+bool hardwareGraphs = false;        // UI thread only, like every Graph
 
 struct Factories {
     ID2D1Factory* d2d = nullptr;
@@ -160,6 +161,15 @@ void Graph::themeChanged() {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void SetHardwareGraphs(bool hardware) {
+    hardwareGraphs = hardware;
+}
+
+void Graph::reset() {
+    releaseTarget();
+    themeChanged();
+}
+
 void Graph::releaseTarget() {
     Release(target_);
 }
@@ -176,9 +186,10 @@ bool Graph::ensureTarget() {
     // 96 dpi on purpose: one unit is one pixel, and the window is already sized for the real dpi.
     // Software on purpose too: a hardware target loads the GPU vendor's user-mode driver (tens of MB
     // of working set), and a few hundred anti-aliased lines a second are nothing for the CPU.
-    // TODO(settings): make hardware rendering a user option (D2D1_RENDER_TARGET_TYPE_DEFAULT, which
-    // still falls back to WARP); software stays the default.
-    const auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(), 96.0f, 96.0f);
+    // The "hardware-accelerated graphs" setting switches to DEFAULT, which uses the GPU and still
+    // falls back to WARP when there is none.
+    const auto type = hardwareGraphs ? D2D1_RENDER_TARGET_TYPE_DEFAULT : D2D1_RENDER_TARGET_TYPE_SOFTWARE;
+    const auto props = D2D1::RenderTargetProperties(type, D2D1::PixelFormat(), 96.0f, 96.0f);
     const auto hwndProps = D2D1::HwndRenderTargetProperties(
         hwnd_, D2D1::SizeU(static_cast<UINT32>(rc.right), static_cast<UINT32>(rc.bottom)));
     return SUCCEEDED(f.d2d->CreateHwndRenderTarget(props, hwndProps, &target_));
