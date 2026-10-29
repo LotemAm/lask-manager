@@ -23,6 +23,7 @@ struct Chrome {
     HFONT title = nullptr;      // 20 px semibold: the Performance tab's headings
     HFONT glyphs = nullptr;     // Segoe Fluent Icons (Segoe MDL2 Assets on Windows 10), navigation size
     HFONT smallGlyphs = nullptr; // the same face, chevron size
+    HFONT menuGlyph = nullptr;   // the same face, hamburger size
     int fontHeight = 16;
     UINT dpi = 96;
 
