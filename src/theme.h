@@ -45,8 +45,9 @@ struct Theme {
 };
 
 // Reads AppsUseLightTheme and the DWM accent color from the registry (falls back to DWM APIs).
-// High contrast wins over both and maps every role to a system color.
-Theme ReadTheme();
+// High contrast wins over both and maps every role to a system color. `accentHeat` shades the
+// Processes heat map in the accent's hue; false keeps Task Manager's yellow-to-orange.
+Theme ReadTheme(bool accentHeat);
 
 // Dark/light for menus and other uxtheme-drawn parts. Call before creating any window, and again on
 // theme change. Uses the uxtheme ordinals every large Win32 app ships; no-op before Windows 10 1809.
