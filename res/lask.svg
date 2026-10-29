@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="flask-glass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f2f7fc"/><stop offset="1" stop-color="#b9cadc"/>
+    </linearGradient>
+    <linearGradient id="flask-liquid" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4caae6"/><stop offset="1" stop-color="#6a3fd0"/>
+    </linearGradient>
+    <clipPath id="flask-body">
+      <path d="M108 44V102L46 200C36 216 46 232 66 232H190C210 232 220 216 210 200L148 102V44Z"/>
+    </clipPath>
+  </defs>
+  <path d="M108 44V102L46 200C36 216 46 232 66 232H190C210 232 220 216 210 200L148 102V44Z"
+    fill="url(#flask-glass)" stroke="#5d6b7c" stroke-width="8" stroke-linejoin="round"/>
+  <g clip-path="url(#flask-body)">
+    <path d="M20 170L68 148L94 174L126 132L158 164L186 144L236 160V240H20Z" fill="url(#flask-liquid)"/>
+    <path d="M20 170L68 148L94 174L126 132L158 164L186 144L236 160" fill="none"
+      stroke="#bfe6ff" stroke-width="7" stroke-linejoin="round"/>
+    <circle cx="98" cy="204" r="9" fill="#fff" fill-opacity=".55"/>
+    <circle cx="146" cy="214" r="6" fill="#fff" fill-opacity=".55"/>
+    <circle cx="166" cy="188" r="7" fill="#fff" fill-opacity=".55"/>
+  </g>
+  <path d="M120 58V104L88 156" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="8" stroke-linecap="round"/>
+  <rect x="92" y="22" width="72" height="24" rx="10" fill="#e3ebf3" stroke="#5d6b7c" stroke-width="8"/>
+</svg>

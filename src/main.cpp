@@ -9,6 +9,7 @@
 #include "history.h"
 #include "performance.h"
 #include "processes.h"
+#include "resource.h"
 #include "services.h"
 #include "settings.h"
 #include "shell.h"
@@ -199,6 +200,7 @@ struct App {
     bool menuOpen = false;
     lask::Settings settings;
     lask::TrayIcon tray;
+    HICON smallIcon = nullptr; // title bar, taskbar fallback and tray
     UINT taskbarCreated = 0; // Explorer restarted: the tray icon has to be added again
     UINT activateMessage = 0; // a second launch asks the running instance to show itself
     bool exiting = false;     // WM_CLOSE really closes (tray mode otherwise only hides)
@@ -1337,7 +1339,7 @@ void ApplyOnTop() {
 
 void ApplyTray() {
     if (g.settings.tray) {
-        g.tray.show(g.hwnd, kMsgTray, LoadIconW(nullptr, IDI_APPLICATION), L"Lask Manager");
+        g.tray.show(g.hwnd, kMsgTray, g.smallIcon, L"Lask Manager");
         RegisterHotKey(g.hwnd, kHotkeyShow, MOD_WIN | MOD_SHIFT | MOD_NOREPEAT, VK_ESCAPE); // fails soft
     } else {
         g.tray.hide();
@@ -1824,7 +1826,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    // LoadIconMetric picks the size for the current DPI; the .ico has a hand-drawn 16 px image.
+    LoadIconMetric(instance, MAKEINTRESOURCEW(IDI_LASK), LIM_LARGE, &wc.hIcon);
+    LoadIconMetric(instance, MAKEINTRESOURCEW(IDI_LASK), LIM_SMALL, &g.smallIcon);
+    wc.hIconSm = g.smallIcon;
     wc.hbrBackground = g.background;
     wc.lpszClassName = L"LaskManager.Main";
     if (!RegisterClassExW(&wc)) return 1;

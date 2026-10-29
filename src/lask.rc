@@ -1,4 +1,8 @@
 #include <windows.h>
+#include "resource.h"
+
+// Built from res\lask.svg and res\lask-16.svg by scripts\make-icon.ps1.
+IDI_LASK ICON "../res/lask.ico"
 
 1 VERSIONINFO
 FILEVERSION     0,1,0,0
