@@ -2,8 +2,8 @@
 
 Lightweight Task Manager replacement for Windows (`lask.exe`). C++23, raw Win32 + common controls,
 CMake, MSVC. The design is `docs/design.md`; read it before changing architecture. The milestone
-order is in its "Build order" section; milestones 1-4 (kill-only MVP, theme, enrichment, Processes
-tab) are done and milestone 5 (Performance tab) is next.
+order is in its "Build order" section; milestones 1-5 (kill-only MVP, theme, enrichment, Processes
+tab, Performance tab) are done and milestone 6 (Services tab) is next.
 
 ## Build and run
 
@@ -31,13 +31,22 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   (`kFactPath`, `SystemProcessIdInformation`, no OpenProcess), once per process, after the
   visible rows. While the Processes tab is visible the sampler also does one `EnumWindows` per
   tick (titles via `InternalGetWindowText`, which never sends a message to a hung app).
+- The sampler also reads the system counters every tick (`CounterReader`: per-CPU times, memory,
+  `IOCTL_DISK_PERFORMANCE` per physical disk, `GetIfEntry2` per adapter, `D3DKMTQueryStatistics`
+  per GPU node and segment), so the graphs have history from startup. Device discovery happens
+  after the first snapshot is published; disks are rediscovered every 60 ticks, adapters every 5.
+  Clock speed and `GetPerformanceInfo` only run while the Performance tab is visible.
 - A process is identified by `(pid, createTime)`, never by pid alone. Kills verify the create time.
 - Snapshots are immutable once published (`std::atomic<std::shared_ptr<const Snapshot>>`). The UI
   keeps the newest and the previous one; rates are `(current - previous) / elapsed`.
 - Sort never moves a row while the mouse button is down or a menu is open (`IsInteracting()`).
 - The grid is a `ListView` in `LVS_OWNERDATA` mode. Colors go through documented APIs
   (`ListView_SetBkColor`, `NM_CUSTOMDRAW`). Only the performance graphs are hand-drawn (Direct2D,
-  not yet written). No XAML, no WinUI, no .NET, no WinRT activation.
+  `graph.cpp`). No XAML, no WinUI, no .NET, no WinRT activation.
+- Nothing outside the first screen's needs is imported at startup: d2d1/dwrite (graph.cpp),
+  iphlpapi/powrprof (counters.cpp) are `LoadLibraryEx`'d on first use, and gdi32's D3DKMT
+  functions are looked up with `GetProcAddress` so a missing export fails soft. Check with
+  `dumpbin /dependents` after adding a library.
 - Manifest stays `asInvoker`. Elevation is a relaunch with `--kill <pid> --at <createtime>`.
 - Undocumented calls (NT structs and info classes in `snapshot.cpp`, uxtheme ordinals in
   `theme.cpp`) stay isolated in those two files and fail soft. `facts.cpp` reaches the NT ones only
@@ -49,15 +58,21 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 
 ## Conventions
 
-- Files: `snapshot.*` (data), `facts.*` (lazy per-process facts, enrichment thread, UI-side
-  `FactCache`), `theme.*` (look), `ui.*` (what every grid shares: `Chrome` fonts + palette, the
-  dark header, accent selection, filter match), `processes.*` (Processes tab), `main.cpp` (window,
-  nav, Details tab, actions). New tabs get their own file, as a class that holds a `const Chrome&`.
+- Files: `snapshot.*` (data), `counters.*` (system counters, sampler side), `history.*` (rings
+  and the per-device panels, UI side), `facts.*` (lazy per-process facts, enrichment thread,
+  UI-side `FactCache`), `theme.*` (look), `ui.*` (what every grid shares: `Chrome` fonts + palette,
+  the dark header, accent selection, filter match), `graph.*` (the Direct2D graph control),
+  `processes.*` and `performance.*` (tabs), `main.cpp` (window, nav, Details tab, actions). New
+  tabs get their own file, as a class that holds a `const Chrome&`.
 - Namespace `lask`. `g` in main.cpp is the single UI-thread state object; nothing else touches it.
   Tabs get what they need by reference at construction (`Chrome`, `FactCache`, the filter buffer).
 - Every tab rebuilds on every tick, visible or not, so no tab ever holds a `FactEntry*` across a
   `FactCache::sweep()`. The Details grid is created on first show (startup cost); until then it
-  does no work at all.
+  does no work at all. The Performance tab's windows are created on first show too, but
+  `PerfModel` is fed from the first tick; graphs hold `Ring*` into panels, so
+  `PerformanceTab::refresh()` re-points them every tick, visible or not.
+- The rings live on the UI thread and are appended on adopt. A tick skipped while
+  `IsInteracting()` folds into the next one (its rate covers both intervals).
 - UTF-16 everywhere (`UNICODE`), `swprintf_s` into fixed buffers on the paint path; no
   `std::wstring` allocation per row per tick.
 - Colors come from `lask::Theme`; never hard-code a COLORREF outside `theme.cpp`.
@@ -82,6 +97,9 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   column is exactly as wide as the control.
 - `Process.CloseMainWindow()` in a test script closes a message box, not the app, if one is up: a
   test that hangs on exit usually means the app showed an error.
+- A Direct2D hardware render target loads the GPU vendor's user-mode driver: +20 MB working set
+  for a few graphs. The graphs use `D2D1_RENDER_TARGET_TYPE_SOFTWARE`.
+- `fopen_s` opens exclusively: two instrumentation sinks writing one trace file lose one of them.
 
 ## Known cosmetic items
 
@@ -94,13 +112,18 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   and mapping it to the app's own process (Task Manager does) is not done.
 - During the first second the Processes groups settle: a process is "Background" until its path
   arrives and puts it under Windows processes.
-- Working set is ~23 MB with ~970 processes (design target: 20 MB at 400). Startup to first rows
-  is ~15 ms slower than milestone 1 because the first screen now has two ListViews (grid + nav).
+- Working set is ~23 MB with ~970 processes (design target: 20 MB at 400), ~35 MB once the
+  Performance tab has loaded Direct2D. Startup to first rows is ~10-15 ms slower than milestone 1
+  because the first screen now has two ListViews (grid + nav).
+- Per tick at ~950 processes / 13k threads: the process snapshot is ~7 ms on the sampler (the design
+  assumed ~1 ms at 400), counters ~1.6 ms (2 ms with details), UI work ~1 ms. Idle CPU measures
+  1.5-3% of one core on this machine; the design target is 0.5% at 400 processes.
+- CPU per-core graphs cover the current processor group only (64 logical processors at most).
 
 ## Not yet done (from the design)
 
-Performance graphs (Direct2D child window + 300-sample ring buffers, 30 s / 1 min / 5 min views),
-Services tab, GPU column, Properties, column layout persistence, Processes column picker,
+Services tab, GPU column (per process), Properties, column layout persistence, Processes column picker,
+memory composition bar and SMBIOS slot/speed details, per-process network (ETW),
 "Not responding" on the Details tab (window info is only gathered while Processes is visible),
 tray-resident mode, IFEO "replace Task Manager" option, `--bench` flag, I/O priority boost via
 `NtSetInformationProcess(ProcessIoPriority)`.

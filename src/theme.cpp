@@ -90,6 +90,7 @@ void FillHighContrast(Theme& t) {
     t.headerHot = t.headerPressed = GetSysColor(COLOR_BTNFACE);
     t.graphLine = GetSysColor(COLOR_HIGHLIGHT);
     t.graphFill = GetSysColor(COLOR_WINDOW);
+    t.graphGrid = GetSysColor(COLOR_GRAYTEXT);
     t.warning = GetSysColor(COLOR_HOTLIGHT);
     for (auto& c : t.heat) c = t.surface;
 }
@@ -199,6 +200,7 @@ Theme ReadTheme() {
     t.selectionText = t.text;
     t.headerBackground = t.surface;
     t.graphFill = Mix(t.surface, t.graphLine, 20);
+    t.graphGrid = Mix(t.surface, t.graphLine, t.dark ? 18 : 14);
 
     // Task Manager's yellow-to-orange heat cells, toned down on dark so white text stays readable.
     const COLORREF heatLow = t.dark ? RGB(70, 58, 22) : RGB(255, 244, 196);

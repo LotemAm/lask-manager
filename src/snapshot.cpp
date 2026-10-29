@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cwchar>
 #include <iterator>
+#include <optional>
 #include <unordered_map>
 
 namespace lask {
@@ -251,14 +252,19 @@ void Sampler::run(std::stop_token stop) {
     std::vector<std::byte> buffer;
     MEMORYSTATUSEX memory{sizeof memory};
     const uint64_t totalPhysical = GlobalMemoryStatusEx(&memory) ? memory.ullTotalPhys : 0;
+    // Discovering disks, adapters and GPUs takes a few milliseconds; the first snapshot (the one the
+    // user is waiting for) goes out without it.
+    std::optional<CounterReader> counters;
     bool first = true;
     while (!stop.stop_requested()) {
         auto snap = std::make_shared<Snapshot>();
         snap->totalPhysical = totalPhysical;
+        if (counters) counters->read(snap->system, wantDetails_.load(std::memory_order_relaxed));
         if (Capture(buffer, *snap, wantWindows_.load(std::memory_order_relaxed))) {
             latest_.store(std::move(snap), std::memory_order_release);
             if (notify_) PostMessageW(notify_, message_, 0, 0);
         }
+        if (!counters) counters.emplace();
         // The second tick comes quickly so the CPU column fills in almost at once.
         const DWORD wait = first ? 250 : intervalMs_.load(std::memory_order_relaxed);
         first = false;

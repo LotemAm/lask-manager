@@ -11,7 +11,7 @@ freezes the sort while your mouse is down. The full reasoning is in [docs/design
 
 ## Status
 
-Milestones 1-4 of the design's build order:
+Milestones 1-5 of the design's build order:
 
 - **Kill-only MVP.** Flat process grid, sort by any column, Delete ends the selected process,
   restart-as-administrator when Windows says no.
@@ -26,7 +26,12 @@ Milestones 1-4 of the design's build order:
   CPU, memory and disk cells, Not responding / Suspended status, End task (the whole app), End
   process tree, Open file location, Go to details, Switch to. Left navigation between tabs.
 
-The Performance and Services tabs are still to come; see the build order in the design doc.
+- **Performance tab.** CPU (overall or one graph per logical processor), memory, every physical
+  disk (active time, read/write rate, response time), every network adapter (send/receive), every
+  GPU (busiest engine, per-engine %, dedicated and shared memory). Direct2D graphs over 30 s,
+  1 min or 5 min (right-click the graph), sparklines in the panel list, history from startup.
+
+The Services tab is still to come; see the build order in the design doc.
 
 ## Build
 
@@ -47,7 +52,7 @@ From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-
 | Delete | End the selected process |
 | F5 | Refresh now |
 | Ctrl+F | Filter by name, PID, user, description, path or command line |
-| Ctrl+Tab, Ctrl+1, Ctrl+2 | Next tab, Processes, Details |
+| Ctrl+Tab, Ctrl+1, Ctrl+2, Ctrl+3 | Next tab, Processes, Performance, Details |
 | Right / Left | Expand / collapse an app row (Processes) |
 | Enter, double-click | Expand an app row, or switch to a window row (Processes) |
 | Tab | Move between the filter box and the grid |
@@ -60,6 +65,10 @@ From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-
 ```
 src/main.cpp      window, navigation, Details grid, filter box, column picker, actions
 src/processes.*   Processes tab: grouping, folding, expand/collapse, heat-map cells
+src/performance.* Performance tab: panel list with sparklines, detail pane, stats
+src/graph.*       the Direct2D graph control (d2d1/dwrite loaded on first use)
+src/history.*     ring buffers and per-device panels, fed every tick on the UI thread
+src/counters.*    CPU, memory, disk, network and GPU counters, read by the sampler
 src/ui.*          shared grid chrome: fonts, dark header, accent selection, filter match
 src/snapshot.*    one NtQuerySystemInformation call per tick; sampler thread; terminate helpers
 src/facts.*       enrichment thread: icons, descriptions, users, paths, command lines, on demand

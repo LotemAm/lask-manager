@@ -6,6 +6,8 @@
 // per-process facts for the rows on screen; kills and shell calls run on throwaway workers.
 
 #include "facts.h"
+#include "history.h"
+#include "performance.h"
 #include "processes.h"
 #include "snapshot.h"
 #include "theme.h"
@@ -38,6 +40,7 @@ constexpr int kListId = 100; // the Details grid
 constexpr int kFilterId = 101;
 constexpr int kProcessesId = 102;
 constexpr int kNavId = 103;
+constexpr int kPerformanceId = 104;
 constexpr unsigned kDefaultIntervalMs = 1000;
 constexpr int kLookahead = 16;      // rows above and below the visible page whose facts are fetched too
 constexpr uint32_t kSweepEvery = 16; // ticks between sweeps of the UI-side fact cache
@@ -54,17 +57,18 @@ enum Command : int {
     kCmdFind,
     kCmdNextTab,
     kCmdTabProcesses,
+    kCmdTabPerformance,
     kCmdTabDetails,
     kCmdColumnBase = 1100
 };
 
-enum class Tab : int { Processes, Details, Count };
+enum class Tab : int { Processes, Performance, Details, Count }; // navigation order
 
 struct NavItem {
     const wchar_t* glyph; // Segoe Fluent Icons / MDL2 code point
     const wchar_t* label;
 };
-constexpr NavItem kNav[] = {{L"\xE71D", L"Processes"}, {L"\xE8FD", L"Details"}};
+constexpr NavItem kNav[] = {{L"\xE71D", L"Processes"}, {L"\xE9D9", L"Performance"}, {L"\xE8FD", L"Details"}};
 static_assert(std::size(kNav) == static_cast<size_t>(Tab::Count));
 
 // Every column the Details grid can show. App::columns maps the ListView's sub-item indices to these;
@@ -137,6 +141,8 @@ struct App {
     lask::Sampler sampler;
     lask::Enricher enricher;
     lask::ProcessesTab processes{chrome, facts, filterText};
+    lask::PerfModel perf;                            // fed every tick, from startup
+    lask::PerformanceTab performance{chrome, perf}; // its windows are created on first show
     Tab tab = Tab::Processes;
     std::shared_ptr<const lask::Snapshot> current;
     std::shared_ptr<const lask::Snapshot> previous;
@@ -166,7 +172,11 @@ int Compare(const T& a, const T& b) {
 }
 
 HWND ActiveGrid() {
-    return g.tab == Tab::Processes ? g.processes.grid() : g.list;
+    switch (g.tab) {
+    case Tab::Processes: return g.processes.grid();
+    case Tab::Performance: return g.performance.list();
+    default: return g.list;
+    }
 }
 
 // ---- Details: cell values ----------------------------------------------------------------------
@@ -308,7 +318,7 @@ void PublishWanted() {
     if (!g.enricher.running() || !g.current) return;
     std::vector<lask::Identity> ids;
     if (g.tab == Tab::Processes) g.processes.appendVisible(ids);
-    else AppendDetailsVisible(ids);
+    else if (g.tab == Tab::Details) AppendDetailsVisible(ids);
     g.wantedTop = ListView_GetTopIndex(ActiveGrid());
 
     std::vector<lask::Identity> others;
@@ -338,6 +348,8 @@ void AdoptLatestSnapshot() {
     if (g.previous && !g.enricher.running()) g.enricher.start(g.hwnd, kMsgFacts);
     ApplyDetails();
     g.processes.update(g.current, &g.rates);
+    g.perf.update(*g.current, g.previous.get());
+    g.performance.refresh();
     PublishWanted();
 }
 
@@ -521,17 +533,23 @@ void SelectInDetails(const lask::Identity& id) {
 // ---- navigation and tabs -------------------------------------------------------------------------
 
 void EnsureDetails();
+void EnsurePerformance();
 
 void ShowTab(Tab tab) {
     if (tab == Tab::Details) EnsureDetails();
+    if (tab == Tab::Performance) EnsurePerformance();
     const bool focusGrid = GetFocus() != g.nav;
     const bool switched = tab != g.tab;
     g.tab = tab;
     ShowWindow(g.processes.grid(), tab == Tab::Processes ? SW_SHOW : SW_HIDE);
     if (g.list) ShowWindow(g.list, tab == Tab::Details ? SW_SHOW : SW_HIDE);
-    // Window titles and the hung check only cost anything while someone is looking at them.
+    if (g.performance.created()) g.performance.show(tab == Tab::Performance);
+    ShowWindow(g.filter, tab == Tab::Performance ? SW_HIDE : SW_SHOW); // nothing to filter there
+    // Window titles, the hung check, clock speed and pool sizes only cost anything while someone is
+    // looking at them.
     g.sampler.setWantWindows(tab == Tab::Processes);
-    if (switched && tab == Tab::Processes) g.sampler.requestNow(); // titles for the Apps group now
+    g.sampler.setWantDetails(tab == Tab::Performance);
+    if (switched && tab != Tab::Details) g.sampler.requestNow(); // titles or details right away
     ListView_SetItemState(g.nav, static_cast<int>(tab), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     InvalidateRect(g.nav, nullptr, FALSE);
     if (focusGrid) SetFocus(ActiveGrid());
@@ -542,16 +560,6 @@ void OnNavChanged(const NMLISTVIEW* change) {
     if (!(change->uChanged & LVIF_STATE) || !(change->uNewState & LVIS_SELECTED)) return;
     if (change->iItem >= 0 && change->iItem < static_cast<int>(Tab::Count) && change->iItem != static_cast<int>(g.tab))
         ShowTab(static_cast<Tab>(change->iItem));
-}
-
-void RoundFill(HDC dc, const RECT& rc, int radius, COLORREF color) {
-    SetDCBrushColor(dc, color);
-    SetDCPenColor(dc, color);
-    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
-    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-    SelectObject(dc, oldBrush);
-    SelectObject(dc, oldPen);
 }
 
 // Windows 11 navigation look: a rounded pill behind the current and hovered item, an accent bar on
@@ -576,10 +584,10 @@ LRESULT DrawNav(NMLVCUSTOMDRAW* cd) {
         const bool current = i == static_cast<int>(g.tab);
         const bool hot = (cd->nmcd.uItemState & CDIS_HOT) != 0;
         RECT pill = {rc.left + Scale(4), rc.top + Scale(2), rc.right - Scale(4), rc.bottom - Scale(2)};
-        if (current || hot) RoundFill(dc, pill, Scale(8), current ? theme.selectionInactive : theme.headerHot);
+        if (current || hot) lask::RoundFill(dc, pill, Scale(8), current ? theme.selectionInactive : theme.headerHot);
         if (current) {
             const int mid = (pill.top + pill.bottom) / 2;
-            RoundFill(dc, {pill.left, mid - Scale(8), pill.left + Scale(3), mid + Scale(8)}, Scale(3), theme.accentText);
+            lask::RoundFill(dc, {pill.left, mid - Scale(8), pill.left + Scale(3), mid + Scale(8)}, Scale(3), theme.accentText);
         }
 
         SetBkMode(dc, TRANSPARENT);
@@ -643,6 +651,7 @@ void Layout() {
         if (grid)
             SetWindowPos(grid, nullptr, nav, bar, width, std::max(0, static_cast<int>(rc.bottom) - bar),
                      SWP_NOZORDER | SWP_NOACTIVATE);
+    if (g.performance.created()) g.performance.layout(nav, bar, width, std::max(0, static_cast<int>(rc.bottom) - bar));
 }
 
 void SetControlFonts() {
@@ -654,6 +663,7 @@ void SetControlFonts() {
 void RecreateFonts() {
     g.chrome.recreateFonts(g.hwnd);
     SetControlFonts();
+    g.performance.fontsChanged();
 }
 
 void ReplaceBrush(HBRUSH& brush, COLORREF color) {
@@ -671,6 +681,7 @@ void ApplyTheme() {
     if (g.list) lask::ApplyGridTheme(g.list, theme);
     lask::ApplyGridTheme(g.processes.grid(), theme);
     lask::ApplyGridTheme(g.nav, theme);
+    g.performance.applyTheme();
     ListView_SetBkColor(g.nav, theme.background);
 
     lask::AllowDarkModeForWindow(g.filter, theme.dark);
@@ -722,6 +733,13 @@ void EnsureDetails() {
     ApplyDetails();
 }
 
+// Direct2D and DirectWrite load here, on first visit, not at startup.
+void EnsurePerformance() {
+    if (g.performance.created()) return;
+    g.performance.create(g.hwnd, kPerformanceId);
+    Layout();
+}
+
 void RescaleColumns(HWND grid, UINT from, UINT to) {
     if (!grid) return;
     const int n = Header_GetItemCount(ListView_GetHeader(grid));
@@ -762,6 +780,7 @@ void RestartElevated(uint32_t killPid, int64_t killCreateTime) {
 
 std::optional<lask::ActionTarget> SelectedTarget() {
     if (g.tab == Tab::Processes) return g.processes.selection();
+    if (g.tab == Tab::Performance) return std::nullopt;
     const auto id = SelectedIdentity();
     if (!id) return std::nullopt;
     return lask::ActionTarget{*id, {*id}, nullptr};
@@ -958,6 +977,11 @@ LRESULT OnNotify(NMHDR* h) {
         if (h->code == LVN_ITEMCHANGED) OnNavChanged(reinterpret_cast<NMLISTVIEW*>(h));
         return 0;
     }
+    if (h->idFrom == kPerformanceId) {
+        if (h->code == LVN_KEYDOWN && reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey == VK_ESCAPE)
+            PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+        return g.performance.onNotify(h);
+    }
     if (h->idFrom == kProcessesId) {
         switch (h->code) {
         case LVN_KEYDOWN: OnGridKey(reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey); return 0;
@@ -996,10 +1020,9 @@ void OnCommand(WORD id) {
     case kCmdNextTab:
         ShowTab(static_cast<Tab>((static_cast<int>(g.tab) + 1) % static_cast<int>(Tab::Count)));
         break;
-    case kCmdTabProcesses:
-    case kCmdTabDetails:
-        ShowTab(id == kCmdTabProcesses ? Tab::Processes : Tab::Details);
-        break;
+    case kCmdTabProcesses: ShowTab(Tab::Processes); break;
+    case kCmdTabPerformance: ShowTab(Tab::Performance); break;
+    case kCmdTabDetails: ShowTab(Tab::Details); break;
     case kCmdRestartAdmin: RestartElevated(0, 0); break;
     default:
         if (id > kCmdColumnBase && id < kCmdColumnBase + Index(Column::Count))
@@ -1048,7 +1071,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_CONTEXTMENU:
-        if (reinterpret_cast<HWND>(wp) == ActiveGrid()) ShowContextMenu(ActiveGrid(), lp);
+        if (g.tab != Tab::Performance && reinterpret_cast<HWND>(wp) == ActiveGrid()) ShowContextMenu(ActiveGrid(), lp);
         else return DefWindowProcW(hwnd, msg, wp, lp);
         return 0;
     case kMsgSnapshot: OnSnapshot(); return 0;
@@ -1165,7 +1188,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         {FVIRTKEY | FCONTROL, VK_TAB, kCmdNextTab},
         {FVIRTKEY | FCONTROL | FSHIFT, VK_TAB, kCmdNextTab},
         {FVIRTKEY | FCONTROL, '1', kCmdTabProcesses},
-        {FVIRTKEY | FCONTROL, '2', kCmdTabDetails},
+        {FVIRTKEY | FCONTROL, '2', kCmdTabPerformance},
+        {FVIRTKEY | FCONTROL, '3', kCmdTabDetails},
     };
     HACCEL accel = CreateAcceleratorTableW(const_cast<ACCEL*>(accelerators), static_cast<int>(std::size(accelerators)));
 

@@ -20,6 +20,7 @@ struct Chrome {
     Theme theme;
     HFONT font = nullptr;       // the system message font
     HFONT bold = nullptr;       // same, semibold: group headers
+    HFONT title = nullptr;      // 20 px semibold: the Performance tab's headings
     HFONT glyphs = nullptr;     // Segoe Fluent Icons (Segoe MDL2 Assets on Windows 10), navigation size
     HFONT smallGlyphs = nullptr; // the same face, chevron size
     int fontHeight = 16;
@@ -38,6 +39,7 @@ struct ActionTarget {
 };
 
 void FillSolid(HDC dc, const RECT& rc, COLORREF color);
+void RoundFill(HDC dc, const RECT& rc, int radius, COLORREF color);
 
 // A report ListView in owner-data mode with the header drawn from `chrome` (the dark-mode themes
 // leave it light). `chrome` must outlive the window.

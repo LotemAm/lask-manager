@@ -1,6 +1,8 @@
 // Process snapshots: one NtQuerySystemInformation call per tick, published lock-free.
 #pragma once
 
+#include "counters.h"
+
 #include <windows.h>
 
 #include <atomic>
@@ -61,6 +63,7 @@ struct Snapshot {
     bool hasWindows = false;    // windows was filled (only while the Processes tab is visible)
     std::vector<ProcessRow> rows;
     std::vector<WindowInfo> windows;
+    SystemCounters system;      // empty in the very first snapshot (device discovery comes after it)
 
     // Elapsed time since `earlier`, in 100 ns units (the same unit as ProcessRow::cpuTime).
     uint64_t elapsed100ns(const Snapshot& earlier) const;
@@ -92,6 +95,7 @@ public:
     void setInterval(unsigned intervalMs) { intervalMs_.store(intervalMs, std::memory_order_relaxed); }
     void requestNow(); // take a snapshot as soon as possible (F5, after a kill)
     void setWantWindows(bool want) { wantWindows_.store(want, std::memory_order_relaxed); }
+    void setWantDetails(bool want) { wantDetails_.store(want, std::memory_order_relaxed); }
 
     std::shared_ptr<const Snapshot> latest() const { return latest_.load(std::memory_order_acquire); }
 
@@ -101,6 +105,7 @@ private:
     std::atomic<std::shared_ptr<const Snapshot>> latest_;
     std::atomic<unsigned> intervalMs_{1000};
     std::atomic<bool> wantWindows_{false};
+    std::atomic<bool> wantDetails_{false}; // Performance tab visible: clock speed, cache, pools
     HANDLE wake_ = nullptr;
     HWND notify_ = nullptr;
     UINT message_ = 0;

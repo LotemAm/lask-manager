@@ -147,6 +147,8 @@ void Chrome::recreateFonts(HWND measure) {
     HFONT normal = CreateFontIndirectW(&ncm.lfMessageFont);
     ncm.lfMessageFont.lfWeight = FW_SEMIBOLD;
     HFONT semibold = CreateFontIndirectW(&ncm.lfMessageFont);
+    ncm.lfMessageFont.lfHeight = -scale(20);
+    HFONT heading = CreateFontIndirectW(&ncm.lfMessageFont);
 
     HDC dc = GetDC(measure);
     HGDIOBJ old = SelectObject(dc, normal);
@@ -157,6 +159,7 @@ void Chrome::recreateFonts(HWND measure) {
 
     Replace(font, normal);
     Replace(bold, semibold);
+    Replace(title, heading);
     Replace(glyphs, CreateGlyphFont(scale(16)));
     Replace(smallGlyphs, CreateGlyphFont(scale(9)));
 }
@@ -164,6 +167,16 @@ void Chrome::recreateFonts(HWND measure) {
 void FillSolid(HDC dc, const RECT& rc, COLORREF color) {
     SetDCBrushColor(dc, color);
     FillRect(dc, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+}
+
+void RoundFill(HDC dc, const RECT& rc, int radius, COLORREF color) {
+    SetDCBrushColor(dc, color);
+    SetDCPenColor(dc, color);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
 }
 
 HWND CreateGrid(HWND parent, int id, const Chrome& chrome) {

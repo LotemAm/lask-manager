@@ -16,7 +16,11 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 add_executable(lask WIN32
   src/main.cpp
+  src/counters.cpp
   src/facts.cpp
+  src/graph.cpp
+  src/history.cpp
+  src/performance.cpp
   src/processes.cpp
   src/snapshot.cpp
   src/theme.cpp

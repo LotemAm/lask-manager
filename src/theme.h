@@ -29,6 +29,7 @@ struct Theme {
     COLORREF headerPressed = 0;
     COLORREF graphLine = 0;
     COLORREF graphFill = 0;
+    COLORREF graphGrid = 0;       // the faint grid behind a graph
     COLORREF warning = 0;
     // Heat-map cell backgrounds on the Processes tab, from barely busy (0) to very busy (last).
     // All equal to `surface` in high contrast, where shading would fight the user's scheme.
