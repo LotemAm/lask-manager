@@ -21,6 +21,7 @@ struct GraphData {
     const Ring* primary = nullptr;          // solid line over a translucent fill
     const Ring* secondary = nullptr;        // dashed line, no fill
     const std::vector<Ring>* grid = nullptr; // set instead: one small graph per ring, no labels
+    int palette = 0;                        // index into Theme::graph: the colors this graph draws in
     float maximum = 100.0f;                 // value at the top edge
     int samples = 60;                       // how many of the newest samples span the width
     std::wstring topLeft, topRight, bottomLeft, bottomRight;

@@ -88,9 +88,11 @@ void FillHighContrast(Theme& t) {
     t.selectionText = GetSysColor(COLOR_HIGHLIGHTTEXT);
     t.headerBackground = GetSysColor(COLOR_BTNFACE);
     t.headerHot = t.headerPressed = GetSysColor(COLOR_BTNFACE);
-    t.graphLine = GetSysColor(COLOR_HIGHLIGHT);
-    t.graphFill = GetSysColor(COLOR_WINDOW);
-    t.graphGrid = GetSysColor(COLOR_GRAYTEXT);
+    for (auto& g : t.graph) {
+        g.line = GetSysColor(COLOR_HIGHLIGHT);
+        g.fill = GetSysColor(COLOR_WINDOW);
+        g.grid = GetSysColor(COLOR_GRAYTEXT);
+    }
     t.warning = GetSysColor(COLOR_HOTLIGHT);
     t.good = GetSysColor(COLOR_WINDOWTEXT);
     for (auto& c : t.heat) c = t.surface;
@@ -181,7 +183,6 @@ Theme ReadTheme() {
         t.selectionInactive = Mix(t.surface, t.text, 12);
         t.headerHot = Mix(t.surface, t.text, 6);
         t.headerPressed = Mix(t.surface, t.text, 10);
-        t.graphLine = t.accentLight[1];
         t.warning = RGB(252, 225, 0);
         t.good = RGB(108, 203, 95); // Fluent's success color, dark
     } else {
@@ -196,14 +197,26 @@ Theme ReadTheme() {
         t.selectionInactive = Mix(t.surface, t.text, 9);
         t.headerHot = Mix(t.surface, t.text, 4);
         t.headerPressed = Mix(t.surface, t.text, 8);
-        t.graphLine = t.accentDark[0];
         t.warning = RGB(157, 93, 0);
         t.good = RGB(15, 123, 15); // Fluent's success color, light
     }
     t.selectionText = t.text;
     t.headerBackground = t.surface;
-    t.graphFill = Mix(t.surface, t.graphLine, 20);
-    t.graphGrid = Mix(t.surface, t.graphLine, t.dark ? 18 : 14);
+
+    // Each kind of graph has its own hue, so a panel is recognizable at a glance: blue CPU, purple
+    // memory, green disk, orange network, rose GPU. Lighter on dark so the line reads on `surface`.
+    const COLORREF lines[Theme::kGraphKinds] = {
+        t.dark ? RGB(76, 170, 230) : RGB(17, 125, 187),  // CPU
+        t.dark ? RGB(192, 110, 225) : RGB(139, 18, 174), // Memory
+        t.dark ? RGB(110, 200, 60) : RGB(65, 145, 10),   // Disk
+        t.dark ? RGB(255, 160, 60) : RGB(200, 90, 0),    // Network
+        t.dark ? RGB(255, 110, 140) : RGB(196, 36, 78),  // GPU
+    };
+    for (int i = 0; i < Theme::kGraphKinds; ++i) {
+        t.graph[i].line = lines[i];
+        t.graph[i].fill = Mix(t.surface, lines[i], 20);
+        t.graph[i].grid = Mix(t.surface, lines[i], t.dark ? 18 : 14);
+    }
 
     // Task Manager's yellow-to-orange heat cells, toned down on dark so white text stays readable.
     const COLORREF heatLow = t.dark ? RGB(70, 58, 22) : RGB(255, 244, 196);

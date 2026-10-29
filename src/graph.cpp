@@ -53,10 +53,10 @@ struct Brushes {
     ID2D1SolidColorBrush* text = nullptr;
     ID2D1StrokeStyle* dashed = nullptr;
 
-    Brushes(ID2D1RenderTarget* t, const Theme& theme) {
-        t->CreateSolidColorBrush(Color(theme.graphLine), &line);
-        t->CreateSolidColorBrush(Color(theme.graphLine, kFillAlpha), &fill);
-        t->CreateSolidColorBrush(Color(theme.graphGrid), &grid);
+    Brushes(ID2D1RenderTarget* t, const Theme& theme, const Theme::GraphColors& colors) {
+        t->CreateSolidColorBrush(Color(colors.line), &line);
+        t->CreateSolidColorBrush(Color(colors.line, kFillAlpha), &fill);
+        t->CreateSolidColorBrush(Color(colors.grid), &grid);
         t->CreateSolidColorBrush(Color(theme.textSecondary), &text);
         D2D1_STROKE_STYLE_PROPERTIES dash = {D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_FLAT,
                                              D2D1_LINE_JOIN_ROUND, 10.0f, D2D1_DASH_STYLE_DASH, 0.0f};
@@ -211,7 +211,7 @@ void Graph::paint() {
     target_->SetTransform(D2D1::Matrix3x2F::Identity());
     target_->Clear(Color(theme.surface));
     {
-        Brushes b(target_, theme);
+        Brushes b(target_, theme, theme.graph[std::clamp(data_.palette, 0, Theme::kGraphKinds - 1)]);
         const float w = static_cast<float>(rc.right), h = static_cast<float>(rc.bottom);
         if (b.ok() && data_.grid && !data_.grid->empty()) {
             // One small graph per logical processor, laid out close to square.
