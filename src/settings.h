@@ -16,6 +16,7 @@ struct Settings {
     bool hardwareGraphs = false; // Direct2D on the GPU: smoother, ~20 MB more working set
     bool tray = false;           // closing hides to the notification area; starts with Windows
     int tab = 0;
+    bool navCollapsed = false; // the nav shows icons only
 
     bool hasWindow = false; // the window's normal (restored) rectangle, in workspace pixels
     RECT window{};

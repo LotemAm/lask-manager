@@ -44,6 +44,7 @@ constexpr UINT kMsgServiceDone = WM_APP + 5;
 constexpr UINT kMsgTray = WM_APP + 6;
 constexpr int kHotkeyShow = 1;            // Win+Shift+Esc in tray mode (Explorer owns Ctrl+Shift+Esc)
 constexpr int kOptionsId = 106;           // the gear button
+constexpr int kNavToggleId = 107;         // the hamburger button that collapses the nav to icons
 constexpr UINT kPriorityClasses[] = {REALTIME_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, ABOVE_NORMAL_PRIORITY_CLASS,
                                      NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS};
 constexpr const wchar_t* kPriorityNames[] = {L"&Realtime", L"&High", L"&Above normal", L"&Normal", L"&Below normal", L"&Low"};
@@ -59,6 +60,7 @@ constexpr unsigned kDefaultIntervalMs = 1000;
 constexpr int kLookahead = 16;      // rows above and below the visible page whose facts are fetched too
 constexpr uint32_t kSweepEvery = 16; // ticks between sweeps of the UI-side fact cache
 constexpr int kNavWidth = 172;       // at 96 dpi
+constexpr int kNavCollapsedWidth = 46; // icons only
 
 enum Command : int {
     kCmdEndTask = 1001,
@@ -165,6 +167,7 @@ struct App {
     HWND filter = nullptr;
     HWND nav = nullptr;
     HWND options = nullptr; // the gear button
+    HWND navToggle = nullptr; // the hamburger button
     HIMAGELIST navRows = nullptr; // a 1-pixel-wide image list whose height sets the nav row height
     HBRUSH background = nullptr;
     HBRUSH surface = nullptr;
@@ -615,7 +618,7 @@ void OnNavChanged(const NMLISTVIEW* change) {
 }
 
 // Windows 11 navigation look: a rounded pill behind the current and hovered item, an accent bar on
-// the current one, a Fluent glyph and the label.
+// the current one, a Fluent glyph and the label (no label while collapsed; the info tip names it).
 LRESULT DrawNav(NMLVCUSTOMDRAW* cd) {
     const lask::Theme& theme = g.chrome.theme;
     switch (cd->nmcd.dwDrawStage) {
@@ -647,9 +650,11 @@ LRESULT DrawNav(NMLVCUSTOMDRAW* cd) {
         HGDIOBJ oldFont = SelectObject(dc, g.chrome.glyphs);
         RECT glyph = {pill.left + Scale(10), pill.top, pill.left + Scale(36), pill.bottom};
         DrawTextW(dc, kNav[i].glyph, -1, &glyph, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-        SelectObject(dc, g.chrome.font);
-        RECT label = {pill.left + Scale(46), pill.top, pill.right, pill.bottom};
-        DrawTextW(dc, kNav[i].label, -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (!g.settings.navCollapsed) {
+            SelectObject(dc, g.chrome.font);
+            RECT label = {pill.left + Scale(46), pill.top, pill.right, pill.bottom};
+            DrawTextW(dc, kNav[i].label, -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
         SelectObject(dc, oldFont);
         return CDRF_SKIPDEFAULT;
     }
@@ -670,7 +675,7 @@ void CreateNav(HWND parent) {
                                 LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
                             0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNavId)),
                             GetModuleHandleW(nullptr), nullptr);
-    ListView_SetExtendedListViewStyle(g.nav, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    ListView_SetExtendedListViewStyle(g.nav, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
     LVCOLUMNW c{};
     c.mask = LVCF_WIDTH;
     c.cx = Scale(kNavWidth);
@@ -685,16 +690,27 @@ void CreateNav(HWND parent) {
     SizeNavRows();
 }
 
+// Collapsed, the labels only show as tips; expanded, they are on screen already.
+void OnNavInfoTip(NMLVGETINFOTIPW* tip) {
+    if (!tip->pszText || tip->cchTextMax <= 0) return;
+    if (g.settings.navCollapsed && tip->iItem >= 0 && tip->iItem < static_cast<int>(Tab::Count))
+        wcsncpy_s(tip->pszText, tip->cchTextMax, kNav[tip->iItem].label, _TRUNCATE);
+    else
+        tip->pszText[0] = L'\0';
+}
+
 // ---- layout, fonts, theme --------------------------------------------------------------------------
 
 void Layout() {
     RECT rc{};
     GetClientRect(g.hwnd, &rc);
     const int pad = Scale(8);
-    const int nav = Scale(kNavWidth) + Scale(8);
+    const int nav = Scale(g.settings.navCollapsed ? kNavCollapsedWidth : kNavWidth) + Scale(8);
     const int editHeight = g.chrome.fontHeight + Scale(10);
     const int bar = editHeight + 2 * pad;
     const int width = std::max(0, static_cast<int>(rc.right) - nav);
+    // The hamburger is gear-sized and sits at the sidebar's right edge, flush with the nav pills.
+    SetWindowPos(g.navToggle, nullptr, nav - Scale(4) - editHeight, pad, editHeight, editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g.nav, nullptr, 0, bar, nav, std::max(0, static_cast<int>(rc.bottom) - bar), SWP_NOZORDER | SWP_NOACTIVATE);
     ListView_SetColumnWidth(g.nav, 0, nav); // no column edge, so no separator line inside the nav
     SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 2 * pad)), editHeight,
@@ -758,7 +774,10 @@ void CreateControls(HWND parent) {
     g.chrome.recreateFonts(parent);
     g.facts.createImages(g.chrome.dpi);
 
-    g.filter = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0,
+    g.navToggle = CreateWindowExW(0, WC_BUTTONW, L"Navigation", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0,
+                                  0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNavToggleId)),
+                                  GetModuleHandleW(nullptr), nullptr);
+    g.filter =CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0,
                                0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFilterId)),
                                GetModuleHandleW(nullptr), nullptr);
     Edit_SetCueBannerTextFocused(g.filter, L"Filter: name, PID, user, description  (Ctrl+F)", TRUE);
@@ -1211,6 +1230,7 @@ LRESULT OnNotify(NMHDR* h) {
     if (h->idFrom == kNavId) {
         if (h->code == NM_CUSTOMDRAW) return DrawNav(reinterpret_cast<NMLVCUSTOMDRAW*>(h));
         if (h->code == LVN_ITEMCHANGED) OnNavChanged(reinterpret_cast<NMLISTVIEW*>(h));
+        if (h->code == LVN_GETINFOTIPW) OnNavInfoTip(reinterpret_cast<NMLVGETINFOTIPW*>(h));
         return 0;
     }
     if (h->idFrom == kServicesId) {
@@ -1442,6 +1462,13 @@ void OnOptionCommand(WORD id) {
     SaveSettingsSoon();
 }
 
+void ToggleNav() {
+    g.settings.navCollapsed = !g.settings.navCollapsed;
+    Layout();
+    RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    SaveSettingsSoon();
+}
+
 void SetSelectedPriority(int index) {
     const auto target = SelectedTarget();
     if (!target || index < 0 || index >= static_cast<int>(std::size(kPriorityClasses))) return;
@@ -1564,12 +1591,17 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ShowOptionsMenu();
             return 0;
         }
+        if (LOWORD(wp) == kNavToggleId) {
+            ToggleNav();
+            return 0;
+        }
         OnCommand(LOWORD(wp));
         return 0;
     case WM_DRAWITEM: {
-        // The gear button: a Fluent glyph on the bar's own background, a soft fill on hover / press.
+        // The gear and hamburger buttons: a Fluent glyph on the bar's own background, a soft fill on
+        // hover / press.
         const auto* di = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
-        if (di->CtlID != kOptionsId) return FALSE;
+        if (di->CtlID != kOptionsId && di->CtlID != kNavToggleId) return FALSE;
         const lask::Theme& theme = g.chrome.theme;
         lask::FillSolid(di->hDC, di->rcItem, theme.background);
         if (di->itemState & (ODS_SELECTED | ODS_HOTLIGHT | ODS_FOCUS))
@@ -1578,7 +1610,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(di->hDC, theme.text);
         HGDIOBJ old = SelectObject(di->hDC, g.chrome.glyphs);
         RECT rc = di->rcItem;
-        DrawTextW(di->hDC, L"\xE713", 1, &rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        DrawTextW(di->hDC, di->CtlID == kOptionsId ? L"\xE713" : L"\xE700", 1, &rc,
+                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
         SelectObject(di->hDC, old);
         return TRUE;
     }
