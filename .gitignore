@@ -1,0 +1,25 @@
+# Build output
+build/
+out/
+cmake-build-*/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+CMakeUserPresets.json
+
+# Compiler leftovers
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+
+# OS noise
+Thumbs.db
+desktop.ini

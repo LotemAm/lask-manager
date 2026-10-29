@@ -1,0 +1,34 @@
+#include <windows.h>
+
+1 VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS       VS_FF_DEBUG
+#else
+FILEFLAGS       0
+#endif
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Lotem"
+            VALUE "FileDescription",  "Lask Manager"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "lask"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 Lotem"
+            VALUE "OriginalFilename", "lask.exe"
+            VALUE "ProductName",      "Lask Manager"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
