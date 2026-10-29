@@ -25,6 +25,9 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 Testing: put a `lask.json` (`{}` is enough) next to the exe under test. That is portable mode: the
 settings go there instead of `%LOCALAPPDATA%\LaskManager\settings.json`, so tests never touch the
 user's real settings. Remove it afterwards. A test that closes the app normally saves settings.
+`{"theme": 1}` (light) or `2` (dark) in that `lask.json` overrides the Windows app mode, so either
+look can be tested without changing the user's Windows setting. Esc in a grid closes the app (as Task
+Manager's does): a test that sends Esc to dismiss a menu that already closed ends the run.
 
 ## Invariants (do not break these)
 
@@ -122,7 +125,9 @@ user's real settings. Remove it afterwards. A test that closes the app normally 
 - `TerminateProcess` fails with access denied on a process that is already exiting (a parent that
   quit when its child was ended). With a `PROCESS_TERMINATE` handle in hand that means success.
 - A one-column ListView (the nav) draws a column separator at the column's right edge unless the
-  column is exactly as wide as the control.
+  column is exactly as wide as the control. Even then the themed ListView draws the edge as a line
+  in the empty area below the last row; the custom-drawn lists (nav, performance panels) paint it
+  over at `CDDS_POSTPAINT` with `FillBelowRows`.
 - `Process.CloseMainWindow()` in a test script closes a message box, not the app, if one is up: a
   test that hangs on exit usually means the app showed an error.
 - A Direct2D hardware render target loads the GPU vendor's user-mode driver: +20 MB working set
@@ -142,7 +147,11 @@ user's real settings. Remove it afterwards. A test that closes the app normally 
   `ItemsView` themes do). Windows 10's Task Manager had them too; decide later whether to suppress.
 - The filter matches descriptions, users and paths only for processes whose facts were already
   fetched (i.e. that have been on screen); names and PIDs always match.
-- Light theme and high contrast are implemented but have only been checked by reading the code.
+- Light theme was checked on screen in every tab (2026-10-30), and switching Options > Theme
+  (Use Windows setting / Light / Dark) re-themes the running window, menus included. High
+  contrast has only been checked by reading the code. With "Show high usage in the accent color"
+  on, the selected row's tint sits between two heat levels, so in light theme a selection reads
+  much like a shaded cell; only the unshaded Name / Status cells set it apart.
 - UWP apps show up as "Application Frame Host" in Apps: the frame window belongs to that process,
   and mapping it to the app's own process (Task Manager does) is not done.
 - During the first second the Processes groups settle: a process is "Background" until its path

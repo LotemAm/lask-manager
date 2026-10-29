@@ -16,6 +16,7 @@ struct Settings {
     bool hardwareGraphs = false; // Direct2D on the GPU: smoother, ~20 MB more working set
     bool tray = false;           // closing hides to the notification area; starts with Windows
     bool accentHeat = true;      // Processes heat map in the accent color; false = Task Manager's orange
+    int theme = 0;               // 0 follows Windows, 1 light, 2 dark (lask::ThemeMode)
     int tab = 0;
     bool navCollapsed = false; // the nav shows icons only
 

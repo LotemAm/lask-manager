@@ -142,17 +142,21 @@ const DarkModeApi& Api() {
 
 } // namespace
 
-Theme ReadTheme(bool accentHeat) {
+Theme ReadTheme(ThemeMode mode, bool accentHeat) {
     Theme t;
     if (IsHighContrast()) {
         FillHighContrast(t);
         return t;
     }
 
-    DWORD light = 1;
-    if (ReadDword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                  L"AppsUseLightTheme", light))
-        t.dark = light == 0;
+    if (mode == ThemeMode::Light || mode == ThemeMode::Dark) {
+        t.dark = mode == ThemeMode::Dark;
+    } else {
+        DWORD light = 1;
+        if (ReadDword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      L"AppsUseLightTheme", light))
+            t.dark = light == 0;
+    }
 
     // DWM\AccentColor is stored as 0xAABBGGRR, which is exactly a COLORREF once the alpha is masked off.
     DWORD accent = 0;

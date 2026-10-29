@@ -40,6 +40,9 @@ struct ActionTarget {
 
 void FillSolid(HDC dc, const RECT& rc, COLORREF color);
 void RoundFill(HDC dc, const RECT& rc, int radius, COLORREF color);
+// The themed ListView draws its column edge as a line in the empty area below the last row. A
+// custom-drawn list (the nav, the performance panels) calls this at CDDS_POSTPAINT to paint it over.
+void FillBelowRows(HWND list, HDC dc, COLORREF color);
 
 // A report ListView in owner-data mode with the header drawn from `chrome` (the dark-mode themes
 // leave it light). `chrome` must outlive the window.

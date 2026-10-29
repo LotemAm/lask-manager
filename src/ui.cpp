@@ -180,6 +180,19 @@ void RoundFill(HDC dc, const RECT& rc, int radius, COLORREF color) {
     SelectObject(dc, oldPen);
 }
 
+void FillBelowRows(HWND list, HDC dc, COLORREF color) {
+    RECT client{};
+    GetClientRect(list, &client);
+    LONG top = client.top;
+    if (const int count = ListView_GetItemCount(list); count > 0) {
+        RECT last{};
+        last.left = LVIR_BOUNDS;
+        if (SendMessageW(list, LVM_GETITEMRECT, static_cast<WPARAM>(count - 1), reinterpret_cast<LPARAM>(&last)))
+            top = std::max(top, last.bottom);
+    }
+    if (top < client.bottom) FillSolid(dc, {client.left, top, client.right, client.bottom}, color);
+}
+
 HWND CreateGrid(HWND parent, int id, const Chrome& chrome) {
     HWND grid = CreateWindowExW(0, WC_LISTVIEWW, L"",
                                 WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS |

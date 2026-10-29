@@ -44,10 +44,14 @@ struct Theme {
     COLORREF heat[kHeatLevels] = {};
 };
 
-// Reads AppsUseLightTheme and the DWM accent color from the registry (falls back to DWM APIs).
-// High contrast wins over both and maps every role to a system color. `accentHeat` shades the
-// Processes heat map in the accent's hue; false keeps Task Manager's yellow-to-orange.
-Theme ReadTheme(bool accentHeat);
+// Light or dark: as Windows' app mode (AppsUseLightTheme), or forced by the user's option.
+enum class ThemeMode : int { System = 0, Light = 1, Dark = 2 };
+
+// Reads AppsUseLightTheme (for ThemeMode::System) and the DWM accent color from the registry
+// (falls back to DWM APIs). High contrast wins over both and over `mode`, and maps every role to a
+// system color. `accentHeat` shades the Processes heat map in the accent's hue; false keeps Task
+// Manager's yellow-to-orange.
+Theme ReadTheme(ThemeMode mode, bool accentHeat);
 
 // Dark/light for menus and other uxtheme-drawn parts. Call before creating any window, and again on
 // theme change. Uses the uxtheme ordinals every large Win32 app ships; no-op before Windows 10 1809.

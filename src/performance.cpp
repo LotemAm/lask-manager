@@ -439,7 +439,8 @@ void PerformanceTab::drawSparkline(HDC dc, const RECT& box, const Panel& p) cons
 LRESULT PerformanceTab::drawRow(NMLVCUSTOMDRAW* cd) {
     const Theme& theme = chrome_.theme;
     switch (cd->nmcd.dwDrawStage) {
-    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
+    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+    case CDDS_POSTPAINT: FillBelowRows(list_, cd->nmcd.hdc, theme.background); return CDRF_DODEFAULT;
     case CDDS_ITEMPREPAINT: {
         const int i = static_cast<int>(cd->nmcd.dwItemSpec);
         const auto& panels = model_.panels();
