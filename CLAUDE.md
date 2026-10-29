@@ -104,6 +104,9 @@ user's real settings. Remove it afterwards. A test that closes the app normally 
 - UTF-16 everywhere (`UNICODE`), `swprintf_s` into fixed buffers on the paint path; no
   `std::wstring` allocation per row per tick.
 - Colors come from `lask::Theme`; never hard-code a COLORREF outside `theme.cpp`.
+- The app icon (a flask) is drawn in `res/lask.svg`, with a separate pixel-grid `res/lask-16.svg`
+  for 16 px. `scripts\make-icon.ps1` rasterizes both with headless Edge into `res/lask.ico`
+  (PNG entries, 16-256 px); the build does not run it, so commit the regenerated .ico.
 - Measure startup when touching anything on the startup path: `Measure-Command { .\lask.exe }`
   under a CPU + memory hog. Target: under 300 ms idle, under 1.5 s loaded. Each ListView costs
   7-12 ms to create, so don't create one the first screen doesn't show. The sampler starts in
@@ -151,7 +154,6 @@ user's real settings. Remove it afterwards. A test that closes the app normally 
   Performance tab has loaded Direct2D. Startup to first rows is ~10-15 ms slower than milestone 1
   because the first screen now has two ListViews (grid + nav). Restoring the Performance tab as
   the last-used tab loads Direct2D at startup.
-- The tray icon and the window use the stock application icon; there is no app icon yet.
 - Per tick at ~950 processes / 13k threads: the process snapshot is ~7 ms on the sampler (the design
   assumed ~1 ms at 400), counters ~1.6 ms (2 ms with details), UI work ~1 ms. Idle CPU measures
   1.5-3% of one core on this machine; the design target is 0.5% at 400 processes.
@@ -162,5 +164,5 @@ user's real settings. Remove it afterwards. A test that closes the app normally 
 GPU column (per process), Set affinity, Properties, "Go to services" from a process, stopping
 dependent services, Processes column picker, memory composition bar and SMBIOS slot/speed details,
 per-process network (ETW), "Not responding" on the Details tab (window info is only gathered while
-Processes is visible), UWP app mapping, an app icon, code signing (the design's antivirus
+Processes is visible), UWP app mapping, code signing (the design's antivirus
 mitigation), running `--bench` under load in CI.
