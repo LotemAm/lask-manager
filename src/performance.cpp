@@ -120,7 +120,7 @@ void PerformanceTab::layout(int x, int y, int width, int height) {
     const int listWidth = std::min(chrome_.scale(kListWidth), width / 2);
     SetWindowPos(list_, nullptr, x, y, listWidth, height, SWP_NOZORDER | SWP_NOACTIVATE);
     // Leave room for the vertical scroll bar, or a horizontal one appears with it.
-    ListView_SetColumnWidth(list_, 0, listWidth - GetSystemMetricsForDpi(SM_CXVSCROLL, chrome_.dpi));
+    ListView_SetColumnWidth(list_, 0, listWidth - GetSystemMetricsForDpi(SM_CXVSCROLL, chrome_.windowDpi));
     if (detail_) SetWindowPos(detail_, nullptr, x + listWidth, y, std::max(0, width - listWidth), height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 

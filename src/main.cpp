@@ -62,6 +62,7 @@ constexpr int kLookahead = 16;      // rows above and below the visible page who
 constexpr uint32_t kSweepEvery = 16; // ticks between sweeps of the UI-side fact cache
 constexpr int kNavWidth = 172;       // at 96 dpi
 constexpr int kNavCollapsedWidth = 46; // icons only
+constexpr int kUiScales[] = {100, 125, 150, 175, 200}; // the UI scale option, percent
 
 enum Command : int {
     kCmdEndTask = 1001,
@@ -93,9 +94,13 @@ enum Command : int {
     kCmdThemeSystem, // in lask::ThemeMode order
     kCmdThemeLight,
     kCmdThemeDark,
+    kCmdScaleUp,
+    kCmdScaleDown,
+    kCmdScaleReset,
     kCmdReplaceTaskManager,
     kCmdShow,
     kCmdExit,
+    kCmdScaleBase = 1070,    // + index into kUiScales
     kCmdPriorityBase = 1080, // + index into kPriorityClasses
     kCmdColumnBase = 1100
 };
@@ -215,6 +220,15 @@ App g;
 
 int Scale(int px) {
     return g.chrome.scale(px);
+}
+
+// For the window frame: its default and minimum size follow the display, not the UI scale option.
+int WindowScale(int px) {
+    return MulDiv(px, static_cast<int>(g.chrome.windowDpi), 96);
+}
+
+int UiScaleSetting() {
+    return std::clamp(g.settings.uiScale, kUiScales[0], kUiScales[std::size(kUiScales) - 1]);
 }
 
 template <class T>
@@ -720,7 +734,7 @@ void Layout() {
     SetWindowPos(g.navToggle, nullptr, nav - Scale(4) - editHeight, pad, editHeight, editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g.nav, nullptr, 0, bar, nav, std::max(0, static_cast<int>(rc.bottom) - bar), SWP_NOZORDER | SWP_NOACTIVATE);
     ListView_SetColumnWidth(g.nav, 0, nav); // no column edge, so no separator line inside the nav
-    SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 2 * pad)), editHeight,
+    SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 3 * pad - editHeight)), editHeight,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g.options, nullptr, static_cast<int>(rc.right) - pad - editHeight, pad, editHeight, editHeight,
                  SWP_NOZORDER | SWP_NOACTIVATE);
@@ -869,18 +883,46 @@ void RescaleColumns(HWND grid, UINT from, UINT to) {
         ListView_SetColumnWidth(grid, i, MulDiv(ListView_GetColumnWidth(grid, i), static_cast<int>(to), static_cast<int>(from)));
 }
 
-void OnDpiChanged(UINT dpi, const RECT& suggested) {
+// The window's DPI or the UI scale option changed: everything sized at 96 dpi follows.
+void Rescale(UINT windowDpi) {
     const UINT old = g.chrome.dpi;
-    g.chrome.dpi = dpi;
-    RescaleColumns(g.list, old, dpi);
-    RescaleColumns(g.processes.grid(), old, dpi);
-    RescaleColumns(g.services.grid(), old, dpi);
+    g.chrome.windowDpi = windowDpi;
+    g.chrome.dpi = static_cast<UINT>(MulDiv(static_cast<int>(windowDpi), UiScaleSetting(), 100));
+    if (g.chrome.dpi == old) return;
+    RescaleColumns(g.list, old, g.chrome.dpi);
+    RescaleColumns(g.processes.grid(), old, g.chrome.dpi);
+    RescaleColumns(g.services.grid(), old, g.chrome.dpi);
     RecreateFonts();
     SizeNavRows();
-    if (g.facts.createImages(dpi)) SetGridImages();
+    if (g.facts.createImages(g.chrome.dpi)) SetGridImages();
+    PublishWanted(); // carries the new icon size
+}
+
+void OnDpiChanged(UINT dpi, const RECT& suggested) {
+    Rescale(dpi);
     SetWindowPos(g.hwnd, nullptr, suggested.left, suggested.top, suggested.right - suggested.left,
                  suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
-    PublishWanted(); // carries the new icon size
+}
+
+void SetUiScale(int percent) {
+    g.settings.uiScale = percent;
+    Rescale(g.chrome.windowDpi);
+    Layout();
+    RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+// Ctrl+Plus / Ctrl+Minus / Ctrl+wheel: the next listed scale up or down from the current one.
+void StepUiScale(bool up) {
+    const int current = UiScaleSetting();
+    int next = current;
+    if (up) {
+        for (int s : kUiScales)
+            if (s > current) { next = s; break; }
+    } else {
+        for (int s : kUiScales)
+            if (s < current) next = s;
+    }
+    if (next != current) SetUiScale(next);
 }
 
 // ---- actions ---------------------------------------------------------------------------------
@@ -1124,7 +1166,7 @@ void ShowServiceMenu(LPARAM lp) {
     AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), kCmdServiceStart, L"&Start");
     AppendMenuW(menu, MF_STRING | (stoppable ? 0 : MF_GRAYED), kCmdServiceStop, L"S&top");
     AppendMenuW(menu, MF_STRING | (stoppable ? 0 : MF_GRAYED), kCmdServiceRestart, L"&Restart");
-    HBITMAP shield = g.elevated ? nullptr : lask::CreateShieldBitmap(GetSystemMetricsForDpi(SM_CXSMICON, g.chrome.dpi));
+    HBITMAP shield = g.elevated ? nullptr : lask::CreateShieldBitmap(GetSystemMetricsForDpi(SM_CXSMICON, g.chrome.windowDpi));
     if (shield) {
         MENUITEMINFOW mii{};
         mii.cbSize = sizeof mii;
@@ -1426,10 +1468,24 @@ void ShowOptionsMenu() {
     CheckMenuRadioItem(look, kCmdThemeSystem, kCmdThemeDark, kCmdThemeSystem + static_cast<UINT>(ThemeModeSetting()),
                        MF_BYCOMMAND);
 
+    HMENU size = CreatePopupMenu();
+    for (int i = 0; i < static_cast<int>(std::size(kUiScales)); ++i) {
+        wchar_t label[32] = {};
+        swprintf_s(label, i == 0 ? L"%d%%	Ctrl+0" : L"%d%%", kUiScales[i]);
+        AppendMenuW(size, MF_STRING, kCmdScaleBase + i, label);
+        if (kUiScales[i] == UiScaleSetting())
+            CheckMenuRadioItem(size, kCmdScaleBase, kCmdScaleBase + static_cast<UINT>(std::size(kUiScales)) - 1,
+                               kCmdScaleBase + i, MF_BYCOMMAND);
+    }
+    AppendMenuW(size, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(size, MF_STRING, kCmdScaleUp, L"&Larger	Ctrl+Plus");
+    AppendMenuW(size, MF_STRING, kCmdScaleDown, L"&Smaller	Ctrl+Minus");
+
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | (s.alwaysOnTop ? MF_CHECKED : 0), kCmdOnTop, L"Always on &top");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(speed), L"&Update speed");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(look), L"Th&eme");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(size), L"UI &scale");
     AppendMenuW(menu, MF_STRING | (s.hardwareGraphs ? MF_CHECKED : 0), kCmdHardwareGraphs,
                 L"&Hardware-accelerated graphs (uses more memory)");
     AppendMenuW(menu, MF_STRING | (s.tray ? MF_CHECKED : 0), kCmdTray,
@@ -1439,7 +1495,7 @@ void ShowOptionsMenu() {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (lask::IsReplacingTaskManager() ? MF_CHECKED : 0), kCmdReplaceTaskManager,
                 L"&Replace Task Manager");
-    HBITMAP shield = g.elevated ? nullptr : lask::CreateShieldBitmap(GetSystemMetricsForDpi(SM_CXSMICON, g.chrome.dpi));
+    HBITMAP shield = g.elevated ? nullptr : lask::CreateShieldBitmap(GetSystemMetricsForDpi(SM_CXSMICON, g.chrome.windowDpi));
     if (shield) {
         MENUITEMINFOW mii{};
         mii.cbSize = sizeof mii;
@@ -1489,8 +1545,14 @@ void OnOptionCommand(WORD id) {
         s.theme = id - kCmdThemeSystem;
         ApplyTheme();
         break;
+    case kCmdScaleUp: StepUiScale(true); break;
+    case kCmdScaleDown: StepUiScale(false); break;
+    case kCmdScaleReset: SetUiScale(kUiScales[0]); break;
     case kCmdReplaceTaskManager: ToggleReplaceTaskManager(); return;
-    default: return;
+    default:
+        if (id < kCmdScaleBase || id >= kCmdScaleBase + std::size(kUiScales)) return;
+        SetUiScale(kUiScales[id - kCmdScaleBase]);
+        break;
     }
     SaveSettingsSoon();
 }
@@ -1585,10 +1647,14 @@ void OnCommand(WORD id) {
     case kCmdThemeSystem:
     case kCmdThemeLight:
     case kCmdThemeDark:
+    case kCmdScaleUp:
+    case kCmdScaleDown:
+    case kCmdScaleReset:
     case kCmdReplaceTaskManager: OnOptionCommand(id); break;
     case kCmdRestartAdmin: RestartElevated(0, 0); break;
     default:
-        if (id > kCmdColumnBase && id < kCmdColumnBase + Index(Column::Count))
+        if (id >= kCmdScaleBase && id < kCmdScaleBase + std::size(kUiScales)) OnOptionCommand(id);
+        else if (id > kCmdColumnBase && id < kCmdColumnBase + Index(Column::Count))
             ToggleColumn(static_cast<Column>(id - kCmdColumnBase));
         break;
     }
@@ -1611,7 +1677,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        mmi->ptMinTrackSize = {Scale(640), Scale(360)};
+        mmi->ptMinTrackSize = {WindowScale(640), WindowScale(360)};
         return 0;
     }
     case WM_SETFOCUS: SetFocus(ActiveGrid()); return 0;
@@ -1816,7 +1882,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     INITCOMMONCONTROLSEX icc{sizeof icc, ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
 
-    g.chrome.dpi = GetDpiForSystem();
+    g.chrome.windowDpi = GetDpiForSystem();
+    g.chrome.dpi = static_cast<UINT>(MulDiv(static_cast<int>(g.chrome.windowDpi), UiScaleSetting(), 100));
     g.chrome.theme = lask::ReadTheme(ThemeModeSetting(), g.settings.accentHeat);
     lask::SetAppDarkMode(g.chrome.theme.dark); // before any window exists, so menus pick it up
     g.background = CreateSolidBrush(g.chrome.theme.background);
@@ -1837,8 +1904,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     // The Processes tab is the first one shown; it wants window titles from the very first tick.
     g.sampler.setWantWindows(true);
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, g.elevated ? L"Lask Manager (Administrator)" : L"Lask Manager",
-                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, Scale(1120),
-                                Scale(680), nullptr, nullptr, instance, nullptr);
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, WindowScale(1120),
+                                WindowScale(680), nullptr, nullptr, instance, nullptr);
     if (!hwnd) return 1;
     // A medium-integrity second launch must be able to wake an elevated instance.
     ChangeWindowMessageFilterEx(hwnd, g.activateMessage, MSGFLT_ALLOW, nullptr);
@@ -1880,12 +1947,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         {FVIRTKEY | FCONTROL, '3', kCmdTabDetails},
         {FVIRTKEY | FCONTROL, '4', kCmdTabServices},
         {FVIRTKEY | FCONTROL, VK_OEM_COMMA, kCmdOptions},
+        {FVIRTKEY | FCONTROL, VK_OEM_PLUS, kCmdScaleUp},
+        {FVIRTKEY | FCONTROL, VK_ADD, kCmdScaleUp},
+        {FVIRTKEY | FCONTROL, VK_OEM_MINUS, kCmdScaleDown},
+        {FVIRTKEY | FCONTROL, VK_SUBTRACT, kCmdScaleDown},
+        {FVIRTKEY | FCONTROL, '0', kCmdScaleReset},
+        {FVIRTKEY | FCONTROL, VK_NUMPAD0, kCmdScaleReset},
     };
     HACCEL accel = CreateAcceleratorTableW(const_cast<ACCEL*>(accelerators), static_cast<int>(std::size(accelerators)));
 
     MSG m{};
+    int ctrlWheel = 0; // a precision touchpad sends a notch in small pieces
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
         if (TranslateAcceleratorW(hwnd, accel, &m)) continue;
+        if (m.message == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(m.wParam) & MK_CONTROL)) { // Ctrl+wheel: UI scale
+            ctrlWheel += GET_WHEEL_DELTA_WPARAM(m.wParam);
+            for (; ctrlWheel >= WHEEL_DELTA; ctrlWheel -= WHEEL_DELTA) OnCommand(kCmdScaleUp);
+            for (; ctrlWheel <= -WHEEL_DELTA; ctrlWheel += WHEEL_DELTA) OnCommand(kCmdScaleDown);
+            continue;
+        }
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
