@@ -193,6 +193,7 @@ bool LoadSettings(Settings& s) {
         flag("hardwareGraphs", s.hardwareGraphs);
         flag("tray", s.tray);
         integer("tab", s.tab);
+        flag("navCollapsed", s.navCollapsed);
         flag("maximized", s.maximized);
         if (key == "window" && v.kind == Value::Array && v.array.size() == 4) {
             s.window = {v.array[0], v.array[1], v.array[2], v.array[3]};
@@ -218,6 +219,7 @@ bool SaveSettings(const Settings& s) {
     Append(out, "hardwareGraphs", s.hardwareGraphs);
     Append(out, "tray", s.tray);
     Append(out, "tab", static_cast<long long>(s.tab));
+    Append(out, "navCollapsed", s.navCollapsed);
     if (s.hasWindow) Append(out, "window", std::vector<int>{s.window.left, s.window.top, s.window.right, s.window.bottom});
     Append(out, "maximized", s.maximized);
     Append(out, "graphSeconds", static_cast<long long>(s.graphSeconds));
