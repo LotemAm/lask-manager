@@ -192,6 +192,7 @@ bool LoadSettings(Settings& s) {
         integer("refreshMs", s.refreshMs);
         flag("hardwareGraphs", s.hardwareGraphs);
         flag("tray", s.tray);
+        flag("accentHeat", s.accentHeat);
         integer("tab", s.tab);
         flag("navCollapsed", s.navCollapsed);
         flag("maximized", s.maximized);
@@ -218,6 +219,7 @@ bool SaveSettings(const Settings& s) {
     Append(out, "refreshMs", static_cast<long long>(s.refreshMs));
     Append(out, "hardwareGraphs", s.hardwareGraphs);
     Append(out, "tray", s.tray);
+    Append(out, "accentHeat", s.accentHeat);
     Append(out, "tab", static_cast<long long>(s.tab));
     Append(out, "navCollapsed", s.navCollapsed);
     if (s.hasWindow) Append(out, "window", std::vector<int>{s.window.left, s.window.top, s.window.right, s.window.bottom});

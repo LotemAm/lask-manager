@@ -142,7 +142,7 @@ const DarkModeApi& Api() {
 
 } // namespace
 
-Theme ReadTheme() {
+Theme ReadTheme(bool accentHeat) {
     Theme t;
     if (IsHighContrast()) {
         FillHighContrast(t);
@@ -218,10 +218,19 @@ Theme ReadTheme() {
         t.graph[i].grid = Mix(t.surface, lines[i], t.dark ? 18 : 14);
     }
 
-    // Task Manager's yellow-to-orange heat cells, toned down on dark so white text stays readable.
-    const COLORREF heatLow = t.dark ? RGB(70, 58, 22) : RGB(255, 244, 196);
-    const COLORREF heatHigh = t.dark ? RGB(150, 66, 18) : RGB(255, 160, 80);
-    for (int i = 0; i < Theme::kHeatLevels; ++i) t.heat[i] = Mix(heatLow, heatHigh, i * 100 / (Theme::kHeatLevels - 1));
+    if (accentHeat) {
+        // The accent's hue and saturation on a fixed lightness ramp (the same span the classic
+        // cells cover), so any accent, however light or dark, keeps the text readable.
+        const Hsl a = ToHsl(t.accent);
+        const double low = t.dark ? 0.18 : 0.92, high = t.dark ? 0.36 : 0.70;
+        for (int i = 0; i < Theme::kHeatLevels; ++i)
+            t.heat[i] = FromHsl({a.h, a.s, low + (high - low) * i / (Theme::kHeatLevels - 1)});
+    } else {
+        // Task Manager's yellow-to-orange heat cells, toned down on dark so white text stays readable.
+        const COLORREF heatLow = t.dark ? RGB(70, 58, 22) : RGB(255, 244, 196);
+        const COLORREF heatHigh = t.dark ? RGB(150, 66, 18) : RGB(255, 160, 80);
+        for (int i = 0; i < Theme::kHeatLevels; ++i) t.heat[i] = Mix(heatLow, heatHigh, i * 100 / (Theme::kHeatLevels - 1));
+    }
     return t;
 }
 

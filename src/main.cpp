@@ -88,6 +88,7 @@ enum Command : int {
     kCmdSpeedPaused,
     kCmdHardwareGraphs,
     kCmdTray,
+    kCmdAccentHeat,
     kCmdReplaceTaskManager,
     kCmdShow,
     kCmdExit,
@@ -744,7 +745,7 @@ void ReplaceBrush(HBRUSH& brush, COLORREF color) {
 
 void ApplyTheme() {
     lask::Theme& theme = g.chrome.theme;
-    theme = lask::ReadTheme();
+    theme = lask::ReadTheme(g.settings.accentHeat);
     lask::SetAppDarkMode(theme.dark);
     lask::ApplyWindowTheme(g.hwnd, theme);
 
@@ -1413,6 +1414,8 @@ void ShowOptionsMenu() {
                 L"&Hardware-accelerated graphs (uses more memory)");
     AppendMenuW(menu, MF_STRING | (s.tray ? MF_CHECKED : 0), kCmdTray,
                 L"&Keep running in the notification area (Win+Shift+Esc)");
+    AppendMenuW(menu, MF_STRING | (s.accentHeat ? MF_CHECKED : 0), kCmdAccentHeat,
+                L"Show high usage in the &accent color");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (lask::IsReplacingTaskManager() ? MF_CHECKED : 0), kCmdReplaceTaskManager,
                 L"&Replace Task Manager");
@@ -1455,6 +1458,10 @@ void OnOptionCommand(WORD id) {
         s.tray = !s.tray;
         lask::SetStartWithWindows(s.tray); // resident only makes sense if it is already running
         ApplyTray();
+        break;
+    case kCmdAccentHeat:
+        s.accentHeat = !s.accentHeat;
+        ApplyTheme();
         break;
     case kCmdReplaceTaskManager: ToggleReplaceTaskManager(); return;
     default: return;
@@ -1548,6 +1555,7 @@ void OnCommand(WORD id) {
     case kCmdSpeedPaused:
     case kCmdHardwareGraphs:
     case kCmdTray:
+    case kCmdAccentHeat:
     case kCmdReplaceTaskManager: OnOptionCommand(id); break;
     case kCmdRestartAdmin: RestartElevated(0, 0); break;
     default:
@@ -1780,7 +1788,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     InitCommonControlsEx(&icc);
 
     g.chrome.dpi = GetDpiForSystem();
-    g.chrome.theme = lask::ReadTheme();
+    g.chrome.theme = lask::ReadTheme(g.settings.accentHeat);
     lask::SetAppDarkMode(g.chrome.theme.dark); // before any window exists, so menus pick it up
     g.background = CreateSolidBrush(g.chrome.theme.background);
 
