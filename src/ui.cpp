@@ -163,6 +163,7 @@ void Chrome::recreateFonts(HWND measure) {
     Replace(title, heading);
     Replace(glyphs, CreateGlyphFont(scale(16)));
     Replace(smallGlyphs, CreateGlyphFont(scale(9)));
+    Replace(menuGlyph, CreateGlyphFont(scale(13)));
 }
 
 void FillSolid(HDC dc, const RECT& rc, COLORREF color) {

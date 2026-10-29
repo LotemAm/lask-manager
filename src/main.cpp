@@ -26,6 +26,8 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cwchar>
 #include <iterator>
@@ -51,6 +53,7 @@ constexpr UINT kPriorityClasses[] = {REALTIME_PRIORITY_CLASS, HIGH_PRIORITY_CLAS
 constexpr const wchar_t* kPriorityNames[] = {L"&Realtime", L"&High", L"&Above normal", L"&Normal", L"&Below normal", L"&Low"};
 constexpr int kPriorityBase[] = {24, 13, 10, 8, 6, 4}; // the base priority each class gives a process
 constexpr UINT_PTR kTimerDeferredAdopt = 1;
+constexpr UINT_PTR kTimerNavAnimation = 2;
 constexpr int kListId = 100; // the Details grid
 constexpr int kFilterId = 101;
 constexpr int kProcessesId = 102;
@@ -62,6 +65,8 @@ constexpr int kLookahead = 16;      // rows above and below the visible page who
 constexpr uint32_t kSweepEvery = 16; // ticks between sweeps of the UI-side fact cache
 constexpr int kNavWidth = 172;       // at 96 dpi
 constexpr int kNavCollapsedWidth = 46; // icons only
+constexpr int kNavGlyphCenter = 27;    // x of the nav glyphs' centre; the hamburger centres on it too
+constexpr double kNavAnimationMs = 167;
 
 enum Command : int {
     kCmdEndTask = 1001,
@@ -173,6 +178,10 @@ struct App {
     HWND nav = nullptr;
     HWND options = nullptr; // the gear button
     HWND navToggle = nullptr; // the hamburger button
+    HWND hotButton = nullptr; // the gear or hamburger while the mouse is over it
+    bool navAnimating = false;
+    double navAnimationFrom = 0; // nav width at 96 dpi when the running animation started
+    std::chrono::steady_clock::time_point navAnimationStart;
     HIMAGELIST navRows = nullptr; // a 1-pixel-wide image list whose height sets the nav row height
     HBRUSH background = nullptr;
     HBRUSH surface = nullptr;
@@ -657,10 +666,11 @@ LRESULT DrawNav(NMLVCUSTOMDRAW* cd) {
         HGDIOBJ oldFont = SelectObject(dc, g.chrome.glyphs);
         RECT glyph = {pill.left + Scale(10), pill.top, pill.left + Scale(36), pill.bottom};
         DrawTextW(dc, kNav[i].glyph, -1, &glyph, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
-        if (!g.settings.navCollapsed) {
+        // Clipped, not ellipsized: while the nav animates the label slides under its edge.
+        RECT label = {pill.left + Scale(46), pill.top, pill.right, pill.bottom};
+        if (label.right > label.left) {
             SelectObject(dc, g.chrome.font);
-            RECT label = {pill.left + Scale(46), pill.top, pill.right, pill.bottom};
-            DrawTextW(dc, kNav[i].label, -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(dc, kNav[i].label, -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
         }
         SelectObject(dc, oldFont);
         return CDRF_SKIPDEFAULT;
@@ -708,16 +718,30 @@ void OnNavInfoTip(NMLVGETINFOTIPW* tip) {
 
 // ---- layout, fonts, theme --------------------------------------------------------------------------
 
+// The nav's width at 96 dpi: the collapsed or expanded width, or, while it animates, an ease-out
+// cubic between where the animation started and that target.
+double NavUnits() {
+    const double target = g.settings.navCollapsed ? kNavCollapsedWidth : kNavWidth;
+    if (!g.navAnimating) return target;
+    const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - g.navAnimationStart;
+    const double t = elapsed.count() / kNavAnimationMs;
+    if (t >= 1) return target;
+    const double eased = 1 - (1 - t) * (1 - t) * (1 - t);
+    return g.navAnimationFrom + (target - g.navAnimationFrom) * eased;
+}
+
 void Layout() {
     RECT rc{};
     GetClientRect(g.hwnd, &rc);
     const int pad = Scale(8);
-    const int nav = Scale(g.settings.navCollapsed ? kNavCollapsedWidth : kNavWidth) + Scale(8);
+    const int nav = static_cast<int>(std::lround(NavUnits() * g.chrome.dpi / 96.0)) + Scale(8);
     const int editHeight = g.chrome.fontHeight + Scale(10);
     const int bar = editHeight + 2 * pad;
     const int width = std::max(0, static_cast<int>(rc.right) - nav);
-    // The hamburger is gear-sized and sits at the sidebar's right edge, flush with the nav pills.
-    SetWindowPos(g.navToggle, nullptr, nav - Scale(4) - editHeight, pad, editHeight, editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    // The hamburger stays put at the left, centred over the nav glyphs, as in Task Manager.
+    const int toggleWidth = Scale(32);
+    SetWindowPos(g.navToggle, nullptr, Scale(kNavGlyphCenter) - toggleWidth / 2, pad, toggleWidth, editHeight,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(g.nav, nullptr, 0, bar, nav, std::max(0, static_cast<int>(rc.bottom) - bar), SWP_NOZORDER | SWP_NOACTIVATE);
     ListView_SetColumnWidth(g.nav, 0, nav); // no column edge, so no separator line inside the nav
     SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 2 * pad)), editHeight,
@@ -1210,6 +1234,20 @@ LRESULT CALLBACK FilterSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, U
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+// The gear and hamburger: owner-drawn buttons get no hover state of their own, so track it here.
+LRESULT CALLBACK BarButtonSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_MOUSEMOVE && g.hotButton != hwnd) {
+        g.hotButton = hwnd;
+        TRACKMOUSEEVENT track{sizeof track, TME_LEAVE, hwnd, 0};
+        TrackMouseEvent(&track);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (msg == WM_MOUSELEAVE && g.hotButton == hwnd) {
+        g.hotButton = nullptr;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
 void OnFilterChanged() {
     GetWindowTextW(g.filter, g.filterText, static_cast<int>(std::size(g.filterText)));
     ApplyDetails();
@@ -1495,11 +1533,32 @@ void OnOptionCommand(WORD id) {
     SaveSettingsSoon();
 }
 
+// Slides the nav to its other width; a toggle mid-animation turns around from where it is. With
+// "Animation effects" off in Windows it jumps.
 void ToggleNav() {
+    const double from = NavUnits();
     g.settings.navCollapsed = !g.settings.navCollapsed;
+    BOOL animate = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animate, 0);
+    g.navAnimating = animate != FALSE;
+    if (g.navAnimating) {
+        g.navAnimationFrom = from;
+        g.navAnimationStart = std::chrono::steady_clock::now();
+        SetTimer(g.hwnd, kTimerNavAnimation, USER_TIMER_MINIMUM, nullptr);
+    }
     Layout();
-    RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    InvalidateRect(g.nav, nullptr, FALSE);
+    if (GetFocus() == g.navToggle) SetFocus(ActiveGrid()); // keys keep going to the grid, as before the click
     SaveSettingsSoon();
+}
+
+void OnNavAnimationFrame() {
+    if (NavUnits() == (g.settings.navCollapsed ? kNavCollapsedWidth : kNavWidth)) {
+        g.navAnimating = false;
+        KillTimer(g.hwnd, kTimerNavAnimation);
+    }
+    Layout();
+    InvalidateRect(g.nav, nullptr, FALSE); // every label's clip moves
 }
 
 void SetSelectedPriority(int index) {
@@ -1603,6 +1662,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.sampler.start(hwnd, kMsgSnapshot, g.settings.refreshMs ? g.settings.refreshMs : INFINITE);
         CreateControls(hwnd);
         SetWindowSubclass(g.filter, FilterSubclassProc, 1, 0);
+        SetWindowSubclass(g.options, BarButtonSubclassProc, 1, 0);
+        SetWindowSubclass(g.navToggle, BarButtonSubclassProc, 1, 0);
         ShowTab(g.settings.tab >= 0 && g.settings.tab < static_cast<int>(Tab::Count) ? static_cast<Tab>(g.settings.tab)
                                                                                      : Tab::Processes);
         return 0;
@@ -1636,19 +1697,19 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DRAWITEM: {
         // The gear and hamburger buttons: a Fluent glyph on the bar's own background, a soft fill on
-        // hover / press.
+        // hover / press only (a focus fill would stay lit after every click).
         const auto* di = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
         if (di->CtlID != kOptionsId && di->CtlID != kNavToggleId) return FALSE;
         const lask::Theme& theme = g.chrome.theme;
         lask::FillSolid(di->hDC, di->rcItem, theme.background);
-        if (di->itemState & (ODS_SELECTED | ODS_HOTLIGHT | ODS_FOCUS))
-            lask::RoundFill(di->hDC, di->rcItem, Scale(6), (di->itemState & ODS_SELECTED) ? theme.headerPressed : theme.headerHot);
+        if ((di->itemState & ODS_SELECTED) || di->hwndItem == g.hotButton)
+            lask::RoundFill(di->hDC, di->rcItem, Scale(4), (di->itemState & ODS_SELECTED) ? theme.headerPressed : theme.headerHot);
         SetBkMode(di->hDC, TRANSPARENT);
         SetTextColor(di->hDC, theme.text);
-        HGDIOBJ old = SelectObject(di->hDC, g.chrome.glyphs);
+        const bool gear = di->CtlID == kOptionsId;
+        HGDIOBJ old = SelectObject(di->hDC, gear ? g.chrome.glyphs : g.chrome.menuGlyph);
         RECT rc = di->rcItem;
-        DrawTextW(di->hDC, di->CtlID == kOptionsId ? L"\xE713" : L"\xE700", 1, &rc,
-                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+        DrawTextW(di->hDC, gear ? L"\xE713" : L"\xE700", 1, &rc, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
         SelectObject(di->hDC, old);
         return TRUE;
     }
@@ -1678,6 +1739,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case kMsgServiceConfigs: g.services.onConfigs(reinterpret_cast<lask::ServiceConfigBatch*>(lp)); return 0;
     case kMsgServiceDone: OnServiceDone(reinterpret_cast<ServiceResult*>(lp)); return 0;
     case WM_TIMER:
+        if (wp == kTimerNavAnimation) OnNavAnimationFrame();
         if (wp == kTimerDeferredAdopt && !IsInteracting()) {
             KillTimer(hwnd, kTimerDeferredAdopt);
             AdoptLatestSnapshot();
