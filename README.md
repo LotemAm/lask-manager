@@ -1,4 +1,4 @@
-# Lask Manager
+<h1><img src="res/lask.svg" alt="" width="44" height="44" align="center"> Lask Manager</h1>
 
 A lightweight Task Manager for Windows: opens instantly on a machine that is already thrashing, and
 ends the process you point at. One small native exe, no runtime, four tabs (Processes, Performance,
@@ -8,40 +8,6 @@ Why: the Windows 11 Task Manager is a XAML app that opens every process on start
 starved it takes seconds to appear, makes things worse while it is up, and re-sorts the row you are
 about to right-click. `lask.exe` takes one kernel snapshot per tick, never blocks its UI thread, and
 freezes the sort while your mouse is down. The full reasoning is in [docs/design.md](docs/design.md).
-
-## Status
-
-All seven milestones of the design's build order:
-
-- **Kill-only MVP.** Flat process grid, sort by any column, Delete ends the selected process,
-  restart-as-administrator when Windows says no.
-- **Theme.** Light/dark and the accent color from the registry, accent shades derived in HSL,
-  accent-tinted selection and sorted-column header, dark title bar and menus, high-contrast
-  support, live updates when any of these change.
-- **Enrichment.** Icons, description, user, image path, command line, elevation and architecture,
-  fetched on a below-normal worker only for rows on screen. Status (Running / Suspended) and
-  priority come from the snapshot. Column picker (right-click the header) and a filter box.
-- **Processes tab.** Apps / Background processes / Windows processes, a program and its
-  same-named children folded into one expandable row that also lists its windows, heat-shaded
-  CPU, memory and disk cells, Not responding / Suspended status, End task (the whole app), End
-  process tree, Open file location, Go to details, Switch to. Left navigation between tabs.
-
-- **Performance tab.** CPU (overall or one graph per logical processor), memory, every physical
-  disk (active time, read/write rate, response time), every network adapter (send/receive), every
-  GPU (busiest engine, per-engine %, dedicated and shared memory). Direct2D graphs over 30 s,
-  1 min or 5 min (right-click the graph), sparklines in the panel list, history from startup.
-
-- **Services tab.** Every Win32 service with PID, display name, status dot, startup type
-  (including delayed and trigger start), svchost group and description; sortable and filterable.
-  Start, Stop, Restart (with the UAC shield, and an offer to restart elevated and finish the action
-  there when Windows says no), Go to details, Open Services.
-
-- **Polish.** Options (gear button, Ctrl+,): always on top; update speed 0.5 s / 1 s / 2 s /
-  paused; hardware-accelerated graphs (smoother, ~20 MB more memory); keep running in the
-  notification area (starts with Windows, Win+Shift+Esc shows it, closing hides it, sampling
-  pauses while hidden); replace Task Manager. Window position, tab, column widths and order, sort
-  and graph range are remembered. One instance: a second launch shows the running one. Set
-  priority on the Processes and Details menus. High I/O priority for itself when elevated.
 
 ## Settings
 
@@ -90,6 +56,8 @@ From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-
 | Ctrl+F | Filter by name, PID, user, description, path or command line |
 | Ctrl+Tab, Ctrl+1 ... Ctrl+4 | Next tab; Processes, Performance, Details, Services |
 | Ctrl+, | Options |
+| Ctrl+Plus / Ctrl+Minus, Ctrl+wheel | Zoom the UI in / out (100% to 200%) |
+| Ctrl+0 | Reset the UI zoom to 100% |
 | Win+Shift+Esc | Show or hide (when kept in the notification area) |
 | Right / Left | Expand / collapse an app row (Processes) |
 | Enter, double-click | Expand an app row, or switch to a window row (Processes) |
