@@ -2,8 +2,8 @@
 
 Lightweight Task Manager replacement for Windows (`lask.exe`). C++23, raw Win32 + common controls,
 CMake, MSVC. The design is `docs/design.md`; read it before changing architecture. The milestone
-order is in its "Build order" section; milestones 1-5 (kill-only MVP, theme, enrichment, Processes
-tab, Performance tab) are done and milestone 6 (Services tab) is next.
+order is in its "Build order" section; milestones 1-6 (kill-only MVP, theme, enrichment, Processes,
+Performance and Services tabs) are done and milestone 7 (polish) is next.
 
 ## Build and run
 
@@ -36,6 +36,15 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   per GPU node and segment), so the graphs have history from startup. Device discovery happens
   after the first snapshot is published; disks are rediscovered every 60 ticks, adapters every 5.
   Clock speed and `GetPerformanceInfo` only run while the Performance tab is visible.
+- Services: the sampler calls `EnumServicesStatusEx` only while the Services tab is visible, every
+  5th tick or at once on `refreshServices()` (tab opened, action started or finished); the list is
+  a `shared_ptr<const ServiceList>` shared by snapshots in between. Configs (`QueryServiceConfig`,
+  description, delayed / trigger start) are fetched once per service name on a detached
+  below-normal thread (`LoadServiceConfigs`), not on the enrichment thread: they are keyed by
+  name, not by process identity. Start / stop / restart run on throwaway workers.
+- Elevation relaunch arguments: `--kill <pid> --at <createtime>` and
+  `--service <start|stop|restart> "<name>"`; the service action runs on a worker after the first
+  paint, with the Services tab showing.
 - A process is identified by `(pid, createTime)`, never by pid alone. Kills verify the create time.
 - Snapshots are immutable once published (`std::atomic<std::shared_ptr<const Snapshot>>`). The UI
   keeps the newest and the previous one; rates are `(current - previous) / elapsed`.
@@ -62,15 +71,17 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
   and the per-device panels, UI side), `facts.*` (lazy per-process facts, enrichment thread,
   UI-side `FactCache`), `theme.*` (look), `ui.*` (what every grid shares: `Chrome` fonts + palette,
   the dark header, accent selection, filter match), `graph.*` (the Direct2D graph control),
-  `processes.*` and `performance.*` (tabs), `main.cpp` (window, nav, Details tab, actions). New
-  tabs get their own file, as a class that holds a `const Chrome&`.
+  `services.*` (service list, configs, actions), `processes.*`, `performance.*` and
+  `servicestab.*` (tabs), `main.cpp` (window, nav, Details tab, actions). New tabs get their own
+  file, as a class that holds a `const Chrome&`.
 - Namespace `lask`. `g` in main.cpp is the single UI-thread state object; nothing else touches it.
   Tabs get what they need by reference at construction (`Chrome`, `FactCache`, the filter buffer).
 - Every tab rebuilds on every tick, visible or not, so no tab ever holds a `FactEntry*` across a
   `FactCache::sweep()`. The Details grid is created on first show (startup cost); until then it
   does no work at all. The Performance tab's windows are created on first show too, but
   `PerfModel` is fed from the first tick; graphs hold `Ring*` into panels, so
-  `PerformanceTab::refresh()` re-points them every tick, visible or not.
+  `PerformanceTab::refresh()` re-points them every tick, visible or not. The Services grid is
+  also created on first show.
 - The rings live on the UI thread and are appended on adopt. A tick skipped while
   `IsInteracting()` folds into the next one (its rate covers both intervals).
 - UTF-16 everywhere (`UNICODE`), `swprintf_s` into fixed buffers on the paint path; no
@@ -98,8 +109,12 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 - `Process.CloseMainWindow()` in a test script closes a message box, not the app, if one is up: a
   test that hangs on exit usually means the app showed an error.
 - A Direct2D hardware render target loads the GPU vendor's user-mode driver: +20 MB working set
-  for a few graphs. The graphs use `D2D1_RENDER_TARGET_TYPE_SOFTWARE`.
+  for a few graphs. The graphs use `D2D1_RENDER_TARGET_TYPE_SOFTWARE` by default; hardware
+  rendering is to become a user setting (see "Not yet done").
 - `fopen_s` opens exclusively: two instrumentation sinks writing one trace file lose one of them.
+- Testing service actions: pick a service whose DACL gives `RP` (start) only to SY/BA (`sc sdshow`),
+  e.g. ALG. Many manual services (TapiSrv) let interactive users start them, so an "expect access
+  denied" test would really start the service.
 
 ## Known cosmetic items
 
@@ -122,7 +137,12 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 
 ## Not yet done (from the design)
 
-Services tab, GPU column (per process), Properties, column layout persistence, Processes column picker,
+Settings (milestone 7) must include a "hardware-accelerated graphs" option: Direct2D
+`D2D1_RENDER_TARGET_TYPE_DEFAULT` (GPU, ~20 MB more working set) instead of the software default;
+the switch is one line in `Graph::ensureTarget()` plus releasing existing targets.
+
+
+GPU column (per process), Properties, "Go to services" from a process, stopping dependent services, column layout persistence, Processes column picker,
 memory composition bar and SMBIOS slot/speed details, per-process network (ETW),
 "Not responding" on the Details tab (window info is only gathered while Processes is visible),
 tray-resident mode, IFEO "replace Task Manager" option, `--bench` flag, I/O priority boost via

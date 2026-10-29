@@ -31,6 +31,7 @@ struct Theme {
     COLORREF graphFill = 0;
     COLORREF graphGrid = 0;       // the faint grid behind a graph
     COLORREF warning = 0;
+    COLORREF good = 0;            // a running service's status dot
     // Heat-map cell backgrounds on the Processes tab, from barely busy (0) to very busy (last).
     // All equal to `surface` in high contrast, where shading would fight the user's scheme.
     static constexpr int kHeatLevels = 5;

@@ -1,5 +1,6 @@
 #include "ui.h"
 
+#include <shellapi.h>
 #include <uxtheme.h>
 
 #include <algorithm>
@@ -235,6 +236,25 @@ bool MatchesFilter(const ProcessRow& row, const ProcessFacts* facts, const wchar
 
 void FormatMemory(uint64_t bytes, wchar_t* out, size_t count) {
     swprintf_s(out, count, L"%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+}
+
+HBITMAP CreateShieldBitmap(int size) {
+    SHSTOCKICONINFO info{};
+    info.cbSize = sizeof info;
+    if (FAILED(SHGetStockIconInfo(SIID_SHIELD, SHGSI_ICON | SHGSI_SMALLICON, &info))) return nullptr;
+    BITMAPINFO bi{};
+    bi.bmiHeader = {sizeof(BITMAPINFOHEADER), size, -size, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bitmap = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bitmap) {
+        HGDIOBJ old = SelectObject(dc, bitmap);
+        DrawIconEx(dc, 0, 0, info.hIcon, size, size, 0, nullptr, DI_NORMAL); // keeps the icon's alpha
+        SelectObject(dc, old);
+    }
+    DeleteDC(dc);
+    DestroyIcon(info.hIcon);
+    return bitmap;
 }
 
 void SwitchToWindow(HWND window) {

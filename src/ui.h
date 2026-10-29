@@ -57,6 +57,9 @@ bool MatchesFilter(const ProcessRow& row, const ProcessFacts* facts, const wchar
 
 void FormatMemory(uint64_t bytes, wchar_t* out, size_t count);
 
+// The UAC shield as a 32-bit menu bitmap (MENUITEMINFO::hbmpItem); the caller deletes it.
+HBITMAP CreateShieldBitmap(int size);
+
 // Brings another process's window forward. Neither call waits on the target's message loop.
 void SwitchToWindow(HWND window);
 

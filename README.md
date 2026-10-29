@@ -11,7 +11,7 @@ freezes the sort while your mouse is down. The full reasoning is in [docs/design
 
 ## Status
 
-Milestones 1-5 of the design's build order:
+Milestones 1-6 of the design's build order:
 
 - **Kill-only MVP.** Flat process grid, sort by any column, Delete ends the selected process,
   restart-as-administrator when Windows says no.
@@ -31,7 +31,12 @@ Milestones 1-5 of the design's build order:
   GPU (busiest engine, per-engine %, dedicated and shared memory). Direct2D graphs over 30 s,
   1 min or 5 min (right-click the graph), sparklines in the panel list, history from startup.
 
-The Services tab is still to come; see the build order in the design doc.
+- **Services tab.** Every Win32 service with PID, display name, status dot, startup type
+  (including delayed and trigger start), svchost group and description; sortable and filterable.
+  Start, Stop, Restart (with the UAC shield, and an offer to restart elevated and finish the action
+  there when Windows says no), Go to details, Open Services.
+
+Milestone 7 (polish: settings, tray, replace Task Manager, release zip) is next; see the design doc.
 
 ## Build
 
@@ -52,7 +57,7 @@ From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-
 | Delete | End the selected process |
 | F5 | Refresh now |
 | Ctrl+F | Filter by name, PID, user, description, path or command line |
-| Ctrl+Tab, Ctrl+1, Ctrl+2, Ctrl+3 | Next tab, Processes, Performance, Details |
+| Ctrl+Tab, Ctrl+1 ... Ctrl+4 | Next tab; Processes, Performance, Details, Services |
 | Right / Left | Expand / collapse an app row (Processes) |
 | Enter, double-click | Expand an app row, or switch to a window row (Processes) |
 | Tab | Move between the filter box and the grid |
@@ -69,6 +74,8 @@ src/performance.* Performance tab: panel list with sparklines, detail pane, stat
 src/graph.*       the Direct2D graph control (d2d1/dwrite loaded on first use)
 src/history.*     ring buffers and per-device panels, fed every tick on the UI thread
 src/counters.*    CPU, memory, disk, network and GPU counters, read by the sampler
+src/services.*    service list, per-service config fetch, start / stop / restart
+src/servicestab.* Services tab: grid with status dots, sort, filter
 src/ui.*          shared grid chrome: fonts, dark header, accent selection, filter match
 src/snapshot.*    one NtQuerySystemInformation call per tick; sampler thread; terminate helpers
 src/facts.*       enrichment thread: icons, descriptions, users, paths, command lines, on demand

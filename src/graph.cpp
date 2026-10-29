@@ -176,6 +176,8 @@ bool Graph::ensureTarget() {
     // 96 dpi on purpose: one unit is one pixel, and the window is already sized for the real dpi.
     // Software on purpose too: a hardware target loads the GPU vendor's user-mode driver (tens of MB
     // of working set), and a few hundred anti-aliased lines a second are nothing for the CPU.
+    // TODO(settings): make hardware rendering a user option (D2D1_RENDER_TARGET_TYPE_DEFAULT, which
+    // still falls back to WARP); software stays the default.
     const auto props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(), 96.0f, 96.0f);
     const auto hwndProps = D2D1::HwndRenderTargetProperties(
         hwnd_, D2D1::SizeU(static_cast<UINT32>(rc.right), static_cast<UINT32>(rc.bottom)));

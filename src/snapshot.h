@@ -2,6 +2,7 @@
 #pragma once
 
 #include "counters.h"
+#include "services.h"
 
 #include <windows.h>
 
@@ -64,6 +65,7 @@ struct Snapshot {
     std::vector<ProcessRow> rows;
     std::vector<WindowInfo> windows;
     SystemCounters system;      // empty in the very first snapshot (device discovery comes after it)
+    std::shared_ptr<const ServiceList> services; // refreshed every 5th tick while wanted; null before
 
     // Elapsed time since `earlier`, in 100 ns units (the same unit as ProcessRow::cpuTime).
     uint64_t elapsed100ns(const Snapshot& earlier) const;
@@ -96,6 +98,8 @@ public:
     void requestNow(); // take a snapshot as soon as possible (F5, after a kill)
     void setWantWindows(bool want) { wantWindows_.store(want, std::memory_order_relaxed); }
     void setWantDetails(bool want) { wantDetails_.store(want, std::memory_order_relaxed); }
+    void setWantServices(bool want) { wantServices_.store(want, std::memory_order_relaxed); }
+    void refreshServices() { refreshServices_.store(true, std::memory_order_relaxed); } // next tick, not 5th
 
     std::shared_ptr<const Snapshot> latest() const { return latest_.load(std::memory_order_acquire); }
 
@@ -106,6 +110,8 @@ private:
     std::atomic<unsigned> intervalMs_{1000};
     std::atomic<bool> wantWindows_{false};
     std::atomic<bool> wantDetails_{false}; // Performance tab visible: clock speed, cache, pools
+    std::atomic<bool> wantServices_{false}; // Services tab visible
+    std::atomic<bool> refreshServices_{false};
     HANDLE wake_ = nullptr;
     HWND notify_ = nullptr;
     UINT message_ = 0;

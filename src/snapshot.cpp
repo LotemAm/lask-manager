@@ -255,10 +255,23 @@ void Sampler::run(std::stop_token stop) {
     // Discovering disks, adapters and GPUs takes a few milliseconds; the first snapshot (the one the
     // user is waiting for) goes out without it.
     std::optional<CounterReader> counters;
+    SC_HANDLE scm = nullptr;
+    std::shared_ptr<const ServiceList> services;
+    uint32_t tick = 0;
     bool first = true;
     while (!stop.stop_requested()) {
         auto snap = std::make_shared<Snapshot>();
         snap->totalPhysical = totalPhysical;
+        // Services: only while someone looks at them, every 5th tick (they change slowly), or at once
+        // after the tab opens or an action finishes.
+        if (wantServices_.load(std::memory_order_relaxed)) {
+            if (!scm) scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ENUMERATE_SERVICE);
+            const bool due = refreshServices_.exchange(false, std::memory_order_relaxed) || !services || tick % 5 == 0;
+            if (scm && due)
+                if (auto list = ReadServices(scm)) services = std::move(list);
+        }
+        snap->services = services;
+        ++tick;
         if (counters) counters->read(snap->system, wantDetails_.load(std::memory_order_relaxed));
         if (Capture(buffer, *snap, wantWindows_.load(std::memory_order_relaxed))) {
             latest_.store(std::move(snap), std::memory_order_release);
@@ -270,6 +283,7 @@ void Sampler::run(std::stop_token stop) {
         first = false;
         WaitForSingleObject(wake_, wait);
     }
+    if (scm) CloseServiceHandle(scm);
 }
 
 // ---- actions ---------------------------------------------------------------------------------

@@ -92,6 +92,7 @@ void FillHighContrast(Theme& t) {
     t.graphFill = GetSysColor(COLOR_WINDOW);
     t.graphGrid = GetSysColor(COLOR_GRAYTEXT);
     t.warning = GetSysColor(COLOR_HOTLIGHT);
+    t.good = GetSysColor(COLOR_WINDOWTEXT);
     for (auto& c : t.heat) c = t.surface;
 }
 
@@ -182,6 +183,7 @@ Theme ReadTheme() {
         t.headerPressed = Mix(t.surface, t.text, 10);
         t.graphLine = t.accentLight[1];
         t.warning = RGB(252, 225, 0);
+        t.good = RGB(108, 203, 95); // Fluent's success color, dark
     } else {
         t.background = RGB(243, 243, 243);
         t.surface = RGB(255, 255, 255);
@@ -196,6 +198,7 @@ Theme ReadTheme() {
         t.headerPressed = Mix(t.surface, t.text, 8);
         t.graphLine = t.accentDark[0];
         t.warning = RGB(157, 93, 0);
+        t.good = RGB(15, 123, 15); // Fluent's success color, light
     }
     t.selectionText = t.text;
     t.headerBackground = t.surface;

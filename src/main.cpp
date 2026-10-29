@@ -9,6 +9,8 @@
 #include "history.h"
 #include "performance.h"
 #include "processes.h"
+#include "services.h"
+#include "servicestab.h"
 #include "snapshot.h"
 #include "theme.h"
 #include "ui.h"
@@ -35,12 +37,15 @@ namespace {
 constexpr UINT kMsgSnapshot = WM_APP + 1;
 constexpr UINT kMsgKillDone = WM_APP + 2;
 constexpr UINT kMsgFacts = WM_APP + 3;
+constexpr UINT kMsgServiceConfigs = WM_APP + 4;
+constexpr UINT kMsgServiceDone = WM_APP + 5;
 constexpr UINT_PTR kTimerDeferredAdopt = 1;
 constexpr int kListId = 100; // the Details grid
 constexpr int kFilterId = 101;
 constexpr int kProcessesId = 102;
 constexpr int kNavId = 103;
 constexpr int kPerformanceId = 104;
+constexpr int kServicesId = 105;
 constexpr unsigned kDefaultIntervalMs = 1000;
 constexpr int kLookahead = 16;      // rows above and below the visible page whose facts are fetched too
 constexpr uint32_t kSweepEvery = 16; // ticks between sweeps of the UI-side fact cache
@@ -59,16 +64,21 @@ enum Command : int {
     kCmdTabProcesses,
     kCmdTabPerformance,
     kCmdTabDetails,
+    kCmdTabServices,
+    kCmdServiceStart,
+    kCmdServiceStop,
+    kCmdServiceRestart,
+    kCmdOpenServices,
     kCmdColumnBase = 1100
 };
 
-enum class Tab : int { Processes, Performance, Details, Count }; // navigation order
+enum class Tab : int { Processes, Performance, Details, Services, Count }; // navigation order
 
 struct NavItem {
     const wchar_t* glyph; // Segoe Fluent Icons / MDL2 code point
     const wchar_t* label;
 };
-constexpr NavItem kNav[] = {{L"\xE71D", L"Processes"}, {L"\xE9D9", L"Performance"}, {L"\xE8FD", L"Details"}};
+constexpr NavItem kNav[] = {{L"\xE71D", L"Processes"}, {L"\xE9D9", L"Performance"}, {L"\xE8FD", L"Details"}, {L"\xEA86", L"Services"}};
 static_assert(std::size(kNav) == static_cast<size_t>(Tab::Count));
 
 // Every column the Details grid can show. App::columns maps the ListView's sub-item indices to these;
@@ -143,6 +153,7 @@ struct App {
     lask::ProcessesTab processes{chrome, facts, filterText};
     lask::PerfModel perf;                            // fed every tick, from startup
     lask::PerformanceTab performance{chrome, perf}; // its windows are created on first show
+    lask::ServicesTab services{chrome, filterText};  // likewise
     Tab tab = Tab::Processes;
     std::shared_ptr<const lask::Snapshot> current;
     std::shared_ptr<const lask::Snapshot> previous;
@@ -175,6 +186,7 @@ HWND ActiveGrid() {
     switch (g.tab) {
     case Tab::Processes: return g.processes.grid();
     case Tab::Performance: return g.performance.list();
+    case Tab::Services: return g.services.grid();
     default: return g.list;
     }
 }
@@ -350,6 +362,7 @@ void AdoptLatestSnapshot() {
     g.processes.update(g.current, &g.rates);
     g.perf.update(*g.current, g.previous.get());
     g.performance.refresh();
+    g.services.update(g.current->services);
     PublishWanted();
 }
 
@@ -534,21 +547,26 @@ void SelectInDetails(const lask::Identity& id) {
 
 void EnsureDetails();
 void EnsurePerformance();
+void EnsureServices();
 
 void ShowTab(Tab tab) {
     if (tab == Tab::Details) EnsureDetails();
     if (tab == Tab::Performance) EnsurePerformance();
+    if (tab == Tab::Services) EnsureServices();
     const bool focusGrid = GetFocus() != g.nav;
     const bool switched = tab != g.tab;
     g.tab = tab;
     ShowWindow(g.processes.grid(), tab == Tab::Processes ? SW_SHOW : SW_HIDE);
     if (g.list) ShowWindow(g.list, tab == Tab::Details ? SW_SHOW : SW_HIDE);
     if (g.performance.created()) g.performance.show(tab == Tab::Performance);
+    if (g.services.created()) ShowWindow(g.services.grid(), tab == Tab::Services ? SW_SHOW : SW_HIDE);
     ShowWindow(g.filter, tab == Tab::Performance ? SW_HIDE : SW_SHOW); // nothing to filter there
     // Window titles, the hung check, clock speed and pool sizes only cost anything while someone is
     // looking at them.
     g.sampler.setWantWindows(tab == Tab::Processes);
     g.sampler.setWantDetails(tab == Tab::Performance);
+    g.sampler.setWantServices(tab == Tab::Services);
+    if (switched && tab == Tab::Services) g.sampler.refreshServices();
     if (switched && tab != Tab::Details) g.sampler.requestNow(); // titles or details right away
     ListView_SetItemState(g.nav, static_cast<int>(tab), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     InvalidateRect(g.nav, nullptr, FALSE);
@@ -647,7 +665,7 @@ void Layout() {
     ListView_SetColumnWidth(g.nav, 0, nav); // no column edge, so no separator line inside the nav
     SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 2 * pad)), editHeight,
                  SWP_NOZORDER | SWP_NOACTIVATE);
-    for (HWND grid : {g.list, g.processes.grid()})
+    for (HWND grid : {g.list, g.processes.grid(), g.services.grid()})
         if (grid)
             SetWindowPos(grid, nullptr, nav, bar, width, std::max(0, static_cast<int>(rc.bottom) - bar),
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -655,7 +673,7 @@ void Layout() {
 }
 
 void SetControlFonts() {
-    for (HWND child : {g.list, g.processes.grid(), g.filter, g.nav})
+    for (HWND child : {g.list, g.processes.grid(), g.services.grid(), g.filter, g.nav})
         if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g.chrome.font), TRUE);
     if (g.filter) SendMessageW(g.filter, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(Scale(4), Scale(4)));
 }
@@ -679,6 +697,7 @@ void ApplyTheme() {
     lask::ApplyWindowTheme(g.hwnd, theme);
 
     if (g.list) lask::ApplyGridTheme(g.list, theme);
+    if (g.services.created()) lask::ApplyGridTheme(g.services.grid(), theme);
     lask::ApplyGridTheme(g.processes.grid(), theme);
     lask::ApplyGridTheme(g.nav, theme);
     g.performance.applyTheme();
@@ -740,6 +759,14 @@ void EnsurePerformance() {
     Layout();
 }
 
+// The service list arrives with the next snapshot; the sampler is told to read it right away.
+void EnsureServices() {
+    if (g.services.created()) return;
+    g.services.create(g.hwnd, kServicesId, kMsgServiceConfigs);
+    Layout();
+    if (g.current) g.services.update(g.current->services);
+}
+
 void RescaleColumns(HWND grid, UINT from, UINT to) {
     if (!grid) return;
     const int n = Header_GetItemCount(ListView_GetHeader(grid));
@@ -752,6 +779,7 @@ void OnDpiChanged(UINT dpi, const RECT& suggested) {
     g.chrome.dpi = dpi;
     RescaleColumns(g.list, old, dpi);
     RescaleColumns(g.processes.grid(), old, dpi);
+    RescaleColumns(g.services.grid(), old, dpi);
     RecreateFonts();
     SizeNavRows();
     if (g.facts.createImages(dpi)) SetGridImages();
@@ -762,12 +790,9 @@ void OnDpiChanged(UINT dpi, const RECT& suggested) {
 
 // ---- actions ---------------------------------------------------------------------------------
 
-void RestartElevated(uint32_t killPid, int64_t killCreateTime) {
+void RestartElevatedWith(const wchar_t* args) {
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    wchar_t args[96] = {};
-    if (killPid) swprintf_s(args, L"--kill %u --at %lld", killPid, static_cast<long long>(killCreateTime));
-
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof sei;
     sei.fMask = SEE_MASK_NOASYNC;
@@ -778,9 +803,86 @@ void RestartElevated(uint32_t killPid, int64_t killCreateTime) {
     if (ShellExecuteExW(&sei)) PostMessageW(g.hwnd, WM_CLOSE, 0, 0); // hand over to the elevated instance
 }
 
+void RestartElevated(uint32_t killPid, int64_t killCreateTime) {
+    wchar_t args[96] = {};
+    if (killPid) swprintf_s(args, L"--kill %u --at %lld", killPid, static_cast<long long>(killCreateTime));
+    RestartElevatedWith(args);
+}
+
+// ---- services ------------------------------------------------------------------------------------
+
+struct ServiceResult {
+    std::wstring name;
+    lask::ServiceAction action;
+    DWORD error;
+};
+
+const wchar_t* Verb(lask::ServiceAction action) {
+    switch (action) {
+    case lask::ServiceAction::Start: return L"start";
+    case lask::ServiceAction::Stop: return L"stop";
+    default: return L"restart";
+    }
+}
+
+// StartService and a restart's wait for "stopped" can take seconds; never on this thread.
+void RunServiceActionAsync(std::wstring name, lask::ServiceAction action) {
+    HWND hwnd = g.hwnd;
+    std::thread([name = std::move(name), action, hwnd] {
+        auto* result = new ServiceResult{name, action, lask::RunServiceAction(name, action)};
+        if (!PostMessageW(hwnd, kMsgServiceDone, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
+    g.sampler.refreshServices(); // show "Stopping" / "Starting" at once
+    g.sampler.requestNow();
+}
+
+void OnServiceDone(ServiceResult* result) {
+    std::unique_ptr<ServiceResult> r(result);
+    g.sampler.refreshServices();
+    g.sampler.requestNow();
+    if (r->error == ERROR_SUCCESS) return;
+    wchar_t message[600] = {};
+    if (r->error == ERROR_ACCESS_DENIED && !g.elevated) {
+        swprintf_s(message, L"Windows needs administrator rights to %s the %s service.\n\n"
+                            L"Restart Lask Manager as administrator and %s it from there?",
+                   Verb(r->action), r->name.c_str(), Verb(r->action));
+        if (MessageBoxW(g.hwnd, message, L"Lask Manager", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1) == IDYES) {
+            const std::wstring args = std::wstring(L"--service ") + Verb(r->action) + L" \"" + r->name + L"\"";
+            RestartElevatedWith(args.c_str());
+        }
+        return;
+    }
+    wchar_t reason[256] = {};
+    FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, r->error, 0, reason,
+                   static_cast<DWORD>(std::size(reason)), nullptr);
+    swprintf_s(message, L"Could not %s the %s service.\n\n%s", Verb(r->action), r->name.c_str(), reason);
+    MessageBoxW(g.hwnd, message, L"Lask Manager", MB_OK | MB_ICONERROR);
+}
+
+void OnServiceCommand(lask::ServiceAction action) {
+    if (const auto s = g.services.selection()) RunServiceActionAsync(s->name, action);
+}
+
+void OpenServicesConsole() {
+    std::thread([] {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        ShellExecuteW(nullptr, L"open", L"services.msc", nullptr, nullptr, SW_SHOWNORMAL);
+        if (SUCCEEDED(com)) CoUninitialize();
+    }).detach();
+}
+
+// The process a service runs in, as an identity from the current snapshot.
+std::optional<lask::Identity> ServiceProcess() {
+    const auto s = g.services.selection();
+    if (!s || !s->pid || !g.current) return std::nullopt;
+    for (const auto& r : g.current->rows)
+        if (r.pid == s->pid) return lask::Identity{r.pid, r.createTime};
+    return std::nullopt;
+}
+
 std::optional<lask::ActionTarget> SelectedTarget() {
     if (g.tab == Tab::Processes) return g.processes.selection();
-    if (g.tab == Tab::Performance) return std::nullopt;
+    if (g.tab == Tab::Performance || g.tab == Tab::Services) return std::nullopt; // no kills from there
     const auto id = SelectedIdentity();
     if (!id) return std::nullopt;
     return lask::ActionTarget{*id, {*id}, nullptr};
@@ -856,10 +958,12 @@ void OpenFileLocation() {
 }
 
 void GoToDetails() {
-    const auto target = SelectedTarget();
-    if (!target) return;
+    std::optional<lask::Identity> id;
+    if (g.tab == Tab::Services) id = ServiceProcess();
+    else if (const auto target = SelectedTarget()) id = target->process;
+    if (!id) return;
     ShowTab(Tab::Details);
-    SelectInDetails(target->process);
+    SelectInDetails(*id);
 }
 
 void OnKillDone(KillResult* result) {
@@ -884,7 +988,7 @@ void OnKillDone(KillResult* result) {
     MessageBoxW(g.hwnd, message, L"Lask Manager", MB_OK | MB_ICONERROR);
 }
 
-void ShowContextMenu(HWND grid, LPARAM lp) {
+POINT MenuPoint(HWND grid, LPARAM lp) {
     POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     if (pt.x == -1 && pt.y == -1) { // keyboard: anchor on the selected row
         const int i = ListView_GetNextItem(grid, -1, LVNI_SELECTED);
@@ -892,6 +996,45 @@ void ShowContextMenu(HWND grid, LPARAM lp) {
         if (i >= 0 && ListView_GetItemRect(grid, i, &rc, LVIR_LABEL)) pt = {rc.left + Scale(8), rc.bottom};
         ClientToScreen(grid, &pt);
     }
+    return pt;
+}
+
+// Start / Stop / Restart carry the UAC shield when we are not elevated: most services need it.
+void ShowServiceMenu(LPARAM lp) {
+    const POINT pt = MenuPoint(g.services.grid(), lp);
+    const auto s = g.services.selection();
+    const bool stopped = s && s->state == SERVICE_STOPPED;
+    const bool stoppable = s && s->state == SERVICE_RUNNING && (s->controlsAccepted & SERVICE_ACCEPT_STOP);
+
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (stopped ? 0 : MF_GRAYED), kCmdServiceStart, L"&Start");
+    AppendMenuW(menu, MF_STRING | (stoppable ? 0 : MF_GRAYED), kCmdServiceStop, L"S&top");
+    AppendMenuW(menu, MF_STRING | (stoppable ? 0 : MF_GRAYED), kCmdServiceRestart, L"&Restart");
+    HBITMAP shield = g.elevated ? nullptr : lask::CreateShieldBitmap(GetSystemMetricsForDpi(SM_CXSMICON, g.chrome.dpi));
+    if (shield) {
+        MENUITEMINFOW mii{};
+        mii.cbSize = sizeof mii;
+        mii.fMask = MIIM_BITMAP;
+        mii.hbmpItem = shield;
+        for (UINT id : {kCmdServiceStart, kCmdServiceStop, kCmdServiceRestart}) SetMenuItemInfoW(menu, id, FALSE, &mii);
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (s && s->pid ? 0 : MF_GRAYED), kCmdGoToDetails, L"&Go to details");
+    AppendMenuW(menu, MF_STRING, kCmdOpenServices, L"&Open Services");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdRefresh, L"Re&fresh now\tF5");
+    AppendMenuW(menu, MF_STRING, kCmdFind, L"F&ilter\tCtrl+F");
+    if (!g.elevated) AppendMenuW(menu, MF_STRING, kCmdRestartAdmin, L"Restart as &administrator");
+
+    g.menuOpen = true;
+    TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, g.hwnd, nullptr);
+    g.menuOpen = false;
+    DestroyMenu(menu);
+    if (shield) DeleteObject(shield);
+}
+
+void ShowContextMenu(HWND grid, LPARAM lp) {
+    const POINT pt = MenuPoint(grid, lp);
     const auto target = SelectedTarget();
     const UINT enabled = target ? 0 : MF_GRAYED;
 
@@ -947,8 +1090,9 @@ void OnFilterChanged() {
     GetWindowTextW(g.filter, g.filterText, static_cast<int>(std::size(g.filterText)));
     ApplyDetails();
     g.processes.refilter();
+    g.services.refilter();
     // Show the matches from the top, or the selected row if it survived the filter.
-    for (HWND grid : {g.list, g.processes.grid()}) {
+    for (HWND grid : {g.list, g.processes.grid(), g.services.grid()}) {
         if (!grid) continue;
         const int selected = ListView_GetNextItem(grid, -1, LVNI_SELECTED);
         if (ListView_GetItemCount(grid) > 0) ListView_EnsureVisible(grid, selected >= 0 ? selected : 0, FALSE);
@@ -976,6 +1120,13 @@ LRESULT OnNotify(NMHDR* h) {
         if (h->code == NM_CUSTOMDRAW) return DrawNav(reinterpret_cast<NMLVCUSTOMDRAW*>(h));
         if (h->code == LVN_ITEMCHANGED) OnNavChanged(reinterpret_cast<NMLISTVIEW*>(h));
         return 0;
+    }
+    if (h->idFrom == kServicesId) {
+        if (h->code == LVN_KEYDOWN) {
+            OnGridKey(reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey); // Delete does nothing here: no target
+            return 0;
+        }
+        return g.services.onNotify(h);
     }
     if (h->idFrom == kPerformanceId) {
         if (h->code == LVN_KEYDOWN && reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey == VK_ESCAPE)
@@ -1023,6 +1174,11 @@ void OnCommand(WORD id) {
     case kCmdTabProcesses: ShowTab(Tab::Processes); break;
     case kCmdTabPerformance: ShowTab(Tab::Performance); break;
     case kCmdTabDetails: ShowTab(Tab::Details); break;
+    case kCmdTabServices: ShowTab(Tab::Services); break;
+    case kCmdServiceStart: OnServiceCommand(lask::ServiceAction::Start); break;
+    case kCmdServiceStop: OnServiceCommand(lask::ServiceAction::Stop); break;
+    case kCmdServiceRestart: OnServiceCommand(lask::ServiceAction::Restart); break;
+    case kCmdOpenServices: OpenServicesConsole(); break;
     case kCmdRestartAdmin: RestartElevated(0, 0); break;
     default:
         if (id > kCmdColumnBase && id < kCmdColumnBase + Index(Column::Count))
@@ -1071,12 +1227,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_CONTEXTMENU:
-        if (g.tab != Tab::Performance && reinterpret_cast<HWND>(wp) == ActiveGrid()) ShowContextMenu(ActiveGrid(), lp);
+        if (g.tab == Tab::Services && reinterpret_cast<HWND>(wp) == ActiveGrid()) ShowServiceMenu(lp);
+        else if (g.tab != Tab::Performance && reinterpret_cast<HWND>(wp) == ActiveGrid()) ShowContextMenu(ActiveGrid(), lp);
         else return DefWindowProcW(hwnd, msg, wp, lp);
         return 0;
     case kMsgSnapshot: OnSnapshot(); return 0;
     case kMsgKillDone: OnKillDone(reinterpret_cast<KillResult*>(lp)); return 0;
     case kMsgFacts: OnFacts(reinterpret_cast<lask::FactsBatch*>(lp)); return 0;
+    case kMsgServiceConfigs: g.services.onConfigs(reinterpret_cast<lask::ServiceConfigBatch*>(lp)); return 0;
+    case kMsgServiceDone: OnServiceDone(reinterpret_cast<ServiceResult*>(lp)); return 0;
     case WM_TIMER:
         if (wp == kTimerDeferredAdopt && !IsInteracting()) {
             KillTimer(hwnd, kTimerDeferredAdopt);
@@ -1128,6 +1287,8 @@ void BoostOwnPriority() {
 struct Options {
     uint32_t killPid = 0;
     int64_t killCreateTime = 0;
+    std::optional<lask::ServiceAction> serviceAction; // --service <start|stop|restart> <name>
+    std::wstring serviceName;
 };
 
 // "--kill <pid> --at <createtime>" is what the elevated relaunch passes. Anything else (such as the
@@ -1140,6 +1301,12 @@ Options ParseCommandLine() {
     for (int i = 1; i + 1 < argc; ++i) {
         if (wcscmp(argv[i], L"--kill") == 0) o.killPid = wcstoul(argv[i + 1], nullptr, 10);
         else if (wcscmp(argv[i], L"--at") == 0) o.killCreateTime = _wcstoi64(argv[i + 1], nullptr, 10);
+        else if (wcscmp(argv[i], L"--service") == 0 && i + 2 < argc) {
+            if (wcscmp(argv[i + 1], L"start") == 0) o.serviceAction = lask::ServiceAction::Start;
+            else if (wcscmp(argv[i + 1], L"stop") == 0) o.serviceAction = lask::ServiceAction::Stop;
+            else if (wcscmp(argv[i + 1], L"restart") == 0) o.serviceAction = lask::ServiceAction::Restart;
+            o.serviceName = argv[i + 2];
+        }
     }
     LocalFree(argv);
     return o;
@@ -1181,6 +1348,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     if (!hwnd) return 1;
     ShowWindow(hwnd, showCommand);
     UpdateWindow(hwnd); // the empty grid is on screen before the first snapshot is handled
+    // The elevated relaunch after "access denied" on a service: do what was asked, on a worker,
+    // with the Services tab showing so the result is visible.
+    if (options.serviceAction && !options.serviceName.empty()) {
+        ShowTab(Tab::Services);
+        RunServiceActionAsync(options.serviceName, *options.serviceAction);
+    }
 
     const ACCEL accelerators[] = {
         {FVIRTKEY | FCONTROL, 'F', kCmdFind},
@@ -1190,6 +1363,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         {FVIRTKEY | FCONTROL, '1', kCmdTabProcesses},
         {FVIRTKEY | FCONTROL, '2', kCmdTabPerformance},
         {FVIRTKEY | FCONTROL, '3', kCmdTabDetails},
+        {FVIRTKEY | FCONTROL, '4', kCmdTabServices},
     };
     HACCEL accel = CreateAcceleratorTableW(const_cast<ACCEL*>(accelerators), static_cast<int>(std::size(accelerators)));
 
