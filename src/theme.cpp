@@ -142,23 +142,20 @@ const DarkModeApi& Api() {
 
 } // namespace
 
-Theme ReadTheme(bool accentHeat) {
+Theme ReadTheme(ThemeMode mode, bool accentHeat) {
     Theme t;
     if (IsHighContrast()) {
         FillHighContrast(t);
         return t;
     }
 
-    DWORD light = 1;
-    if (ReadDword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                  L"AppsUseLightTheme", light))
-        t.dark = light == 0;
-    // LASK_THEME=light|dark overrides the user's setting, so either look can be tested without
-    // changing Windows.
-    wchar_t forced[8] = {};
-    if (GetEnvironmentVariableW(L"LASK_THEME", forced, ARRAYSIZE(forced)) > 0) {
-        if (_wcsicmp(forced, L"light") == 0) t.dark = false;
-        else if (_wcsicmp(forced, L"dark") == 0) t.dark = true;
+    if (mode == ThemeMode::Light || mode == ThemeMode::Dark) {
+        t.dark = mode == ThemeMode::Dark;
+    } else {
+        DWORD light = 1;
+        if (ReadDword(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      L"AppsUseLightTheme", light))
+            t.dark = light == 0;
     }
 
     // DWM\AccentColor is stored as 0xAABBGGRR, which is exactly a COLORREF once the alpha is masked off.

@@ -89,6 +89,9 @@ enum Command : int {
     kCmdHardwareGraphs,
     kCmdTray,
     kCmdAccentHeat,
+    kCmdThemeSystem, // in lask::ThemeMode order
+    kCmdThemeLight,
+    kCmdThemeDark,
     kCmdReplaceTaskManager,
     kCmdShow,
     kCmdExit,
@@ -744,9 +747,15 @@ void ReplaceBrush(HBRUSH& brush, COLORREF color) {
     if (old) DeleteObject(old);
 }
 
+lask::ThemeMode ThemeModeSetting() {
+    const int mode = g.settings.theme;
+    return mode >= 0 && mode <= static_cast<int>(lask::ThemeMode::Dark) ? static_cast<lask::ThemeMode>(mode)
+                                                                         : lask::ThemeMode::System;
+}
+
 void ApplyTheme() {
     lask::Theme& theme = g.chrome.theme;
-    theme = lask::ReadTheme(g.settings.accentHeat);
+    theme = lask::ReadTheme(ThemeModeSetting(), g.settings.accentHeat);
     lask::SetAppDarkMode(theme.dark);
     lask::ApplyWindowTheme(g.hwnd, theme);
 
@@ -1408,9 +1417,17 @@ void ShowOptionsMenu() {
                        : s.refreshMs >= 2000 ? kCmdSpeedLow : kCmdSpeedNormal;
     CheckMenuRadioItem(speed, kCmdSpeedHigh, kCmdSpeedPaused, checked, MF_BYCOMMAND);
 
+    HMENU look = CreatePopupMenu();
+    AppendMenuW(look, MF_STRING, kCmdThemeSystem, L"Use &Windows setting");
+    AppendMenuW(look, MF_STRING, kCmdThemeLight, L"&Light");
+    AppendMenuW(look, MF_STRING, kCmdThemeDark, L"&Dark");
+    CheckMenuRadioItem(look, kCmdThemeSystem, kCmdThemeDark, kCmdThemeSystem + static_cast<UINT>(ThemeModeSetting()),
+                       MF_BYCOMMAND);
+
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING | (s.alwaysOnTop ? MF_CHECKED : 0), kCmdOnTop, L"Always on &top");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(speed), L"&Update speed");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(look), L"Th&eme");
     AppendMenuW(menu, MF_STRING | (s.hardwareGraphs ? MF_CHECKED : 0), kCmdHardwareGraphs,
                 L"&Hardware-accelerated graphs (uses more memory)");
     AppendMenuW(menu, MF_STRING | (s.tray ? MF_CHECKED : 0), kCmdTray,
@@ -1462,6 +1479,12 @@ void OnOptionCommand(WORD id) {
         break;
     case kCmdAccentHeat:
         s.accentHeat = !s.accentHeat;
+        ApplyTheme();
+        break;
+    case kCmdThemeSystem:
+    case kCmdThemeLight:
+    case kCmdThemeDark:
+        s.theme = id - kCmdThemeSystem;
         ApplyTheme();
         break;
     case kCmdReplaceTaskManager: ToggleReplaceTaskManager(); return;
@@ -1557,6 +1580,9 @@ void OnCommand(WORD id) {
     case kCmdHardwareGraphs:
     case kCmdTray:
     case kCmdAccentHeat:
+    case kCmdThemeSystem:
+    case kCmdThemeLight:
+    case kCmdThemeDark:
     case kCmdReplaceTaskManager: OnOptionCommand(id); break;
     case kCmdRestartAdmin: RestartElevated(0, 0); break;
     default:
@@ -1789,7 +1815,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     InitCommonControlsEx(&icc);
 
     g.chrome.dpi = GetDpiForSystem();
-    g.chrome.theme = lask::ReadTheme(g.settings.accentHeat);
+    g.chrome.theme = lask::ReadTheme(ThemeModeSetting(), g.settings.accentHeat);
     lask::SetAppDarkMode(g.chrome.theme.dark); // before any window exists, so menus pick it up
     g.background = CreateSolidBrush(g.chrome.theme.background);
 

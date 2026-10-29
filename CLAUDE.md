@@ -25,8 +25,8 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 Testing: put a `lask.json` (`{}` is enough) next to the exe under test. That is portable mode: the
 settings go there instead of `%LOCALAPPDATA%\LaskManager\settings.json`, so tests never touch the
 user's real settings. Remove it afterwards. A test that closes the app normally saves settings.
-`LASK_THEME=light` (or `dark`) in the environment overrides the Windows app mode, so either look can
-be tested without changing the user's Windows setting. Esc in a grid closes the app (as Task
+`{"theme": 1}` (light) or `2` (dark) in that `lask.json` overrides the Windows app mode, so either
+look can be tested without changing the user's Windows setting. Esc in a grid closes the app (as Task
 Manager's does): a test that sends Esc to dismiss a menu that already closed ends the run.
 
 ## Invariants (do not break these)
@@ -147,7 +147,8 @@ Manager's does): a test that sends Esc to dismiss a menu that already closed end
   `ItemsView` themes do). Windows 10's Task Manager had them too; decide later whether to suppress.
 - The filter matches descriptions, users and paths only for processes whose facts were already
   fetched (i.e. that have been on screen); names and PIDs always match.
-- Light theme was checked on screen in every tab (2026-10-30, via `LASK_THEME=light`). High
+- Light theme was checked on screen in every tab (2026-10-30), and switching Options > Theme
+  (Use Windows setting / Light / Dark) re-themes the running window, menus included. High
   contrast has only been checked by reading the code. With "Show high usage in the accent color"
   on, the selected row's tint sits between two heat levels, so in light theme a selection reads
   much like a shaded cell; only the unshaded Name / Status cells set it apart.
