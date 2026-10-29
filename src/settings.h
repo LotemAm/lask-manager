@@ -17,6 +17,7 @@ struct Settings {
     bool tray = false;           // closing hides to the notification area; starts with Windows
     bool accentHeat = true;      // Processes heat map in the accent color; false = Task Manager's orange
     int theme = 0;               // 0 follows Windows, 1 light, 2 dark (lask::ThemeMode)
+    int uiScale = 100;           // percent, on top of the Windows display scale: fonts, rows, padding
     int tab = 0;
     bool navCollapsed = false; // the nav shows icons only
 

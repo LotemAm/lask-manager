@@ -26,7 +26,8 @@ Testing: put a `lask.json` (`{}` is enough) next to the exe under test. That is 
 settings go there instead of `%LOCALAPPDATA%\LaskManager\settings.json`, so tests never touch the
 user's real settings. Remove it afterwards. A test that closes the app normally saves settings.
 `{"theme": 1}` (light) or `2` (dark) in that `lask.json` overrides the Windows app mode, so either
-look can be tested without changing the user's Windows setting. Esc in a grid closes the app (as Task
+look can be tested without changing the user's Windows setting. `{"uiScale": 150}` (100-200) starts
+at that UI scale. Esc in a grid closes the app (as Task
 Manager's does): a test that sends Esc to dismiss a menu that already closed ends the run.
 
 ## Invariants (do not break these)
@@ -107,6 +108,10 @@ Manager's does): a test that sends Esc to dismiss a menu that already closed end
 - UTF-16 everywhere (`UNICODE`), `swprintf_s` into fixed buffers on the paint path; no
   `std::wstring` allocation per row per tick.
 - Colors come from `lask::Theme`; never hard-code a COLORREF outside `theme.cpp`.
+- Sizes are written at 96 dpi and go through `Chrome::scale`. `Chrome::dpi` is the window's DPI
+  times the UI scale option (Options > UI scale, Ctrl+Plus / Minus / 0, Ctrl+wheel), so fonts,
+  rows, icons and padding all follow it; system metrics (scroll bars, menu bitmaps) and the window
+  frame's default / minimum size use `Chrome::windowDpi`. Menus and tooltips stay at Windows' size.
 - The app icon (a flask) is drawn in `res/lask.svg`, with a separate pixel-grid `res/lask-16.svg`
   for 16 px. `scripts\make-icon.ps1` rasterizes both with headless Edge into `res/lask.ico`
   (PNG entries, 16-256 px); the build does not run it, so commit the regenerated .ico.

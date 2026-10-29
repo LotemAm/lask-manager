@@ -25,7 +25,8 @@ struct Chrome {
     HFONT smallGlyphs = nullptr; // the same face, chevron size
     HFONT menuGlyph = nullptr;   // the same face, hamburger size
     int fontHeight = 16;
-    UINT dpi = 96;
+    UINT dpi = 96;       // what the UI is drawn at: the window's DPI times the UI scale option
+    UINT windowDpi = 96; // the window's own DPI, for system metrics (scroll bars, menu bitmaps)
 
     int scale(int px) const { return MulDiv(px, static_cast<int>(dpi), 96); }
     // Recreates every font for `dpi`; `measure` is any window, for the text metrics.

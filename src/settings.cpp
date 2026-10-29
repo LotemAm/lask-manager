@@ -194,6 +194,7 @@ bool LoadSettings(Settings& s) {
         flag("tray", s.tray);
         flag("accentHeat", s.accentHeat);
         integer("theme", s.theme);
+        integer("uiScale", s.uiScale);
         integer("tab", s.tab);
         flag("navCollapsed", s.navCollapsed);
         flag("maximized", s.maximized);
@@ -222,6 +223,7 @@ bool SaveSettings(const Settings& s) {
     Append(out, "tray", s.tray);
     Append(out, "accentHeat", s.accentHeat);
     Append(out, "theme", static_cast<long long>(s.theme));
+    Append(out, "uiScale", static_cast<long long>(s.uiScale));
     Append(out, "tab",static_cast<long long>(s.tab));
     Append(out, "navCollapsed", s.navCollapsed);
     if (s.hasWindow) Append(out, "window", std::vector<int>{s.window.left, s.window.top, s.window.right, s.window.bottom});
