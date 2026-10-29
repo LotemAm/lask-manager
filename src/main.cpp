@@ -623,7 +623,8 @@ void OnNavChanged(const NMLISTVIEW* change) {
 LRESULT DrawNav(NMLVCUSTOMDRAW* cd) {
     const lask::Theme& theme = g.chrome.theme;
     switch (cd->nmcd.dwDrawStage) {
-    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
+    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+    case CDDS_POSTPAINT: lask::FillBelowRows(g.nav, cd->nmcd.hdc, theme.background); return CDRF_DODEFAULT;
     case CDDS_ITEMPREPAINT: {
         const int i = static_cast<int>(cd->nmcd.dwItemSpec);
         if (i < 0 || i >= static_cast<int>(Tab::Count)) return CDRF_SKIPDEFAULT;
