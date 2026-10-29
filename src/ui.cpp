@@ -212,9 +212,10 @@ HWND CreateGrid(HWND parent, int id, const Chrome& chrome) {
 }
 
 void ApplyGridTheme(HWND grid, const Theme& theme) {
-    // ItemsView is the theme Explorer's own list uses: dark scrollbars and hover. No visual styles at
-    // all in high contrast, where the system colors must win.
-    const wchar_t* name = theme.highContrast ? L"" : (theme.dark ? L"DarkMode_ItemsView" : L"ItemsView");
+    // ItemsView is the theme Explorer's own list uses. Its dark variant leaves the scrollbars light,
+    // so dark mode takes DarkMode_Explorer, whose scrollbars are dark. No visual styles at all in
+    // high contrast, where the system colors must win.
+    const wchar_t* name = theme.highContrast ? L"" : (theme.dark ? L"DarkMode_Explorer" : L"ItemsView");
     AllowDarkModeForWindow(grid, theme.dark);
     SetWindowTheme(grid, name, nullptr);
     ListView_SetBkColor(grid, theme.surface);
