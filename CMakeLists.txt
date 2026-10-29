@@ -16,6 +16,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 add_executable(lask WIN32
   src/main.cpp
+  src/facts.cpp
   src/snapshot.cpp
   src/theme.cpp
   src/lask.rc
@@ -35,7 +36,7 @@ target_compile_definitions(lask PRIVATE
   LASK_VERSION_STRING="${PROJECT_VERSION}")
 
 target_link_libraries(lask PRIVATE
-  ntdll comctl32 dwmapi uxtheme advapi32 shell32 user32 gdi32)
+  ntdll comctl32 dwmapi uxtheme advapi32 shell32 user32 gdi32 version)
 
 target_link_options(lask PRIVATE
   /SUBSYSTEM:WINDOWS

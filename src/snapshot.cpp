@@ -9,6 +9,11 @@ namespace lask {
 namespace {
 
 constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004L);
+constexpr NTSTATUS kStatusBufferTooSmall = static_cast<NTSTATUS>(0xC0000023L);
+constexpr ULONG kThreadStateWaiting = 5;  // KTHREAD_STATE::Waiting
+constexpr ULONG kWaitReasonSuspended = 5; // KWAIT_REASON::Suspended
+constexpr auto kSystemProcessIdInformation = static_cast<SYSTEM_INFORMATION_CLASS>(88);
+constexpr auto kProcessCommandLineInformation = static_cast<PROCESSINFOCLASS>(60);
 
 // winternl.h ships an obfuscated SYSTEM_PROCESS_INFORMATION ("Reserved1" ...). These are the real
 // layouts, as documented by phnt; they have been stable since Windows Vista.
@@ -67,6 +72,11 @@ struct NtProcessInfo {
     LARGE_INTEGER WriteTransferCount;
     LARGE_INTEGER OtherTransferCount;
     NtThreadInfo Threads[1];
+};
+
+struct NtProcessIdInfo {
+    HANDLE ProcessId;
+    UNICODE_STRING ImageName; // caller-supplied buffer; MaximumLength comes back as the size needed
 };
 
 uint32_t HandleToPid(HANDLE h) {
@@ -138,6 +148,13 @@ bool Capture(std::vector<std::byte>& buffer, Snapshot& out) {
         r.ioBytes = static_cast<uint64_t>(p->ReadTransferCount.QuadPart) +
                     static_cast<uint64_t>(p->WriteTransferCount.QuadPart);
         CopyImageName(r.name, p->ImageName, r.pid);
+
+        // Suspended, the way Task Manager means it: no thread can run because every one of them is
+        // parked by a suspend (UWP apps in the background, debuggers, `pssuspend`).
+        r.suspended = r.pid != 0 && p->NumberOfThreads > 0;
+        for (ULONG t = 0; r.suspended && t < p->NumberOfThreads; ++t)
+            r.suspended = p->Threads[t].ThreadState == kThreadStateWaiting &&
+                          p->Threads[t].WaitReason == kWaitReasonSuspended;
 
         if (p->NextEntryOffset == 0) break;
         p = reinterpret_cast<const NtProcessInfo*>(reinterpret_cast<const std::byte*>(p) + p->NextEntryOffset);
@@ -232,6 +249,46 @@ bool EnableDebugPrivilege() {
     ok = ok && AdjustTokenPrivileges(token, FALSE, &tp, sizeof tp, nullptr, nullptr) && GetLastError() == ERROR_SUCCESS;
     CloseHandle(token);
     return ok;
+}
+
+// ---- lazy per-process queries ------------------------------------------------------------------
+
+bool QueryCommandLine(HANDLE process, std::wstring& out) {
+    std::vector<std::byte> buffer(1024);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        ULONG needed = 0;
+        const NTSTATUS status = NtQueryInformationProcess(process, kProcessCommandLineInformation, buffer.data(),
+                                                          static_cast<ULONG>(buffer.size()), &needed);
+        if (status == kStatusInfoLengthMismatch || status == kStatusBufferTooSmall) {
+            if (needed <= buffer.size()) return false;
+            buffer.resize(needed);
+            continue;
+        }
+        if (status < 0) return false;
+        const auto* s = reinterpret_cast<const UNICODE_STRING*>(buffer.data());
+        out.assign(s->Buffer ? s->Buffer : L"", s->Length / sizeof(wchar_t));
+        return true;
+    }
+    return false;
+}
+
+bool QueryImageNtPath(uint32_t pid, std::wstring& out) {
+    std::vector<wchar_t> buffer(512);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        NtProcessIdInfo info{};
+        info.ProcessId = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(pid));
+        info.ImageName.Buffer = buffer.data();
+        info.ImageName.MaximumLength = static_cast<USHORT>(std::min<size_t>(buffer.size() * sizeof(wchar_t), 0xFFFE));
+        const NTSTATUS status = NtQuerySystemInformation(kSystemProcessIdInformation, &info, sizeof info, nullptr);
+        if (status == kStatusInfoLengthMismatch && info.ImageName.MaximumLength > buffer.size() * sizeof(wchar_t)) {
+            buffer.resize(info.ImageName.MaximumLength / sizeof(wchar_t) + 1);
+            continue;
+        }
+        if (status < 0 || info.ImageName.Length == 0) return false;
+        out.assign(buffer.data(), info.ImageName.Length / sizeof(wchar_t));
+        return true;
+    }
+    return false;
 }
 
 } // namespace lask

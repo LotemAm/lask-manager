@@ -11,10 +11,19 @@ freezes the sort while your mouse is down. The full reasoning is in [docs/design
 
 ## Status
 
-Milestone 1 (kill-only MVP): flat process grid with name / PID / CPU / memory / threads / handles,
-sort by any column, Delete ends the selected process, restart-as-administrator when Windows says
-no, light/dark theme and the user's accent color. Everything else in the design is still to come;
-see the build order in the design doc.
+Milestones 1-3 of the design's build order:
+
+- **Kill-only MVP.** Flat process grid, sort by any column, Delete ends the selected process,
+  restart-as-administrator when Windows says no.
+- **Theme.** Light/dark and the accent color from the registry, accent shades derived in HSL,
+  accent-tinted selection and sorted-column header, dark title bar and menus, high-contrast
+  support, live updates when any of these change.
+- **Enrichment.** Icons, description, user, image path, command line, elevation and architecture,
+  fetched on a below-normal worker only for rows on screen. Status (Running / Suspended) and
+  priority come from the snapshot. Column picker (right-click the header) and a filter box.
+
+The Processes, Performance and Services tabs are still to come; see the build order in the design
+doc.
 
 ## Build
 
@@ -34,15 +43,18 @@ From a developer prompt, `cmake --preset ninja` + `cmake --build --preset ninja-
 | --- | --- |
 | Delete | End the selected process |
 | F5 | Refresh now |
-| Esc | Close |
+| Ctrl+F | Filter by name, PID, user, description, path or command line |
+| Tab | Move between the filter box and the grid |
+| Esc | Clear the filter; with no filter, close |
 | Typing | Jump to the next process whose name starts with what you typed |
 | Shift+F10 / Menu | Context menu |
 
 ## Layout
 
 ```
-src/main.cpp      window, grid, context menu, kill flow
+src/main.cpp      window, grid, filter box, column picker, context menu, kill flow
 src/snapshot.*    one NtQuerySystemInformation call per tick; sampler thread; terminate helpers
+src/facts.*       enrichment thread: icons, descriptions, users, paths, command lines, on demand
 src/theme.*       light/dark + accent from the registry, dark title bar, uxtheme dark-mode ordinals
 src/app.manifest  asInvoker, common controls v6, per-monitor v2 DPI
 docs/design.md    the system design this follows
