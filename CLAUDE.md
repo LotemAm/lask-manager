@@ -131,6 +131,8 @@ Manager's does): a test that sends Esc to dismiss a menu that already closed end
   column is exactly as wide as the control. Even then the themed ListView draws the edge as a line
   in the empty area below the last row; the custom-drawn lists (nav, performance panels) paint it
   over at `CDDS_POSTPAINT` with `FillBelowRows`.
+- `DarkMode_ItemsView` on a ListView leaves its scrollbars light; `ApplyGridTheme` uses
+  `DarkMode_Explorer` in dark mode (light mode stays `ItemsView`).
 - `Process.CloseMainWindow()` in a test script closes a message box, not the app, if one is up: a
   test that hangs on exit usually means the app showed an error.
 - A Direct2D hardware render target loads the GPU vendor's user-mode driver: +20 MB working set
