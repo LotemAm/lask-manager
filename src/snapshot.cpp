@@ -1,9 +1,12 @@
 #include "snapshot.h"
 
+#include <dwmapi.h>
 #include <winternl.h>
 
 #include <algorithm>
 #include <cwchar>
+#include <iterator>
+#include <unordered_map>
 
 namespace lask {
 namespace {
@@ -97,6 +100,28 @@ void CopyImageName(wchar_t (&dst)[64], const UNICODE_STRING& s, uint32_t pid) {
     }
 }
 
+// Alt+Tab's notion of an app window: visible, unowned, not a tool window, not cloaked (UWP apps
+// suspended in the background keep cloaked windows), with a title. InternalGetWindowText reads the
+// stored title without sending WM_GETTEXT, so a hung app cannot stall the sampler.
+BOOL CALLBACK CollectWindow(HWND hwnd, LPARAM lp) {
+    if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER)) return TRUE;
+    if (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) return TRUE;
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) return TRUE;
+    wchar_t cls[16];
+    if (GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls))) && wcscmp(cls, L"Progman") == 0) return TRUE; // desktop
+
+    WindowInfo w;
+    if (InternalGetWindowText(hwnd, w.title, static_cast<int>(std::size(w.title))) <= 0) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    w.hwnd = hwnd;
+    w.pid = pid;
+    w.hung = IsHungAppWindow(hwnd) != FALSE;
+    reinterpret_cast<std::vector<WindowInfo>*>(lp)->push_back(w);
+    return TRUE;
+}
+
 uint32_t LogicalCpuCount() {
     const DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     return n ? n : 1;
@@ -111,7 +136,7 @@ uint64_t Snapshot::elapsed100ns(const Snapshot& earlier) const {
     return (ticks / qpcFrequency) * 10'000'000ull + ((ticks % qpcFrequency) * 10'000'000ull) / qpcFrequency;
 }
 
-bool Capture(std::vector<std::byte>& buffer, Snapshot& out) {
+bool Capture(std::vector<std::byte>& buffer, Snapshot& out, bool windows) {
     if (buffer.empty()) buffer.resize(512 * 1024);
 
     NTSTATUS status = kStatusInfoLengthMismatch;
@@ -159,7 +184,35 @@ bool Capture(std::vector<std::byte>& buffer, Snapshot& out) {
         if (p->NextEntryOffset == 0) break;
         p = reinterpret_cast<const NtProcessInfo*>(reinterpret_cast<const std::byte*>(p) + p->NextEntryOffset);
     }
+
+    out.windows.clear();
+    out.hasWindows = windows;
+    if (windows) EnumWindows(CollectWindow, reinterpret_cast<LPARAM>(&out.windows));
     return true;
+}
+
+void ComputeRates(const Snapshot& current, const Snapshot* previous, std::vector<RowRates>& out) {
+    out.assign(current.rows.size(), RowRates{});
+    if (!previous) return;
+    const uint64_t elapsed = current.elapsed100ns(*previous);
+    if (!elapsed) return;
+    const double cpuDenominator = static_cast<double>(elapsed) * current.logicalCpus;
+    const double seconds = static_cast<double>(elapsed) / 10'000'000.0;
+
+    std::unordered_map<uint32_t, const ProcessRow*> previousByPid;
+    previousByPid.reserve(previous->rows.size());
+    for (const auto& r : previous->rows) previousByPid.emplace(r.pid, &r);
+
+    for (size_t i = 0; i < current.rows.size(); ++i) {
+        const ProcessRow& r = current.rows[i];
+        auto it = previousByPid.find(r.pid);
+        if (it == previousByPid.end() || it->second->createTime != r.createTime) continue;
+        const ProcessRow& before = *it->second;
+        const uint64_t cpu = r.cpuTime >= before.cpuTime ? r.cpuTime - before.cpuTime : 0;
+        const uint64_t io = r.ioBytes >= before.ioBytes ? r.ioBytes - before.ioBytes : 0;
+        out[i].cpu = std::clamp(100.0 * static_cast<double>(cpu) / cpuDenominator, 0.0, 100.0);
+        out[i].diskBytesPerSec = static_cast<double>(io) / seconds;
+    }
 }
 
 // ---- Sampler ---------------------------------------------------------------------------------
@@ -196,10 +249,13 @@ void Sampler::requestNow() {
 void Sampler::run(std::stop_token stop) {
     std::stop_callback onStop(stop, [this] { SetEvent(wake_); });
     std::vector<std::byte> buffer;
+    MEMORYSTATUSEX memory{sizeof memory};
+    const uint64_t totalPhysical = GlobalMemoryStatusEx(&memory) ? memory.ullTotalPhys : 0;
     bool first = true;
     while (!stop.stop_requested()) {
         auto snap = std::make_shared<Snapshot>();
-        if (Capture(buffer, *snap)) {
+        snap->totalPhysical = totalPhysical;
+        if (Capture(buffer, *snap, wantWindows_.load(std::memory_order_relaxed))) {
             latest_.store(std::move(snap), std::memory_order_release);
             if (notify_) PostMessageW(notify_, message_, 0, 0);
         }
@@ -212,8 +268,9 @@ void Sampler::run(std::stop_token stop) {
 
 // ---- actions ---------------------------------------------------------------------------------
 
-DWORD TerminateProcessByIdentity(uint32_t pid, int64_t createTime) {
-    HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+DWORD TerminateProcessByIdentity(uint32_t pid, int64_t createTime, DWORD waitMs) {
+    const DWORD access = PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | (waitMs ? SYNCHRONIZE : 0);
+    HANDLE h = OpenProcess(access, FALSE, pid);
     if (!h) return GetLastError();
 
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -224,9 +281,33 @@ DWORD TerminateProcessByIdentity(uint32_t pid, int64_t createTime) {
             return ERROR_NOT_FOUND; // the PID now belongs to a different process
         }
     }
-    const DWORD err = TerminateProcess(h, 1) ? ERROR_SUCCESS : GetLastError();
+    DWORD err = TerminateProcess(h, 1) ? ERROR_SUCCESS : GetLastError();
+    // We hold PROCESS_TERMINATE, so "access denied" here means the process is already on its way
+    // out (STATUS_PROCESS_IS_TERMINATING), typically a parent that exited when its child was ended.
+    if (err == ERROR_ACCESS_DENIED) err = ERROR_SUCCESS;
+    if (err == ERROR_SUCCESS && waitMs) WaitForSingleObject(h, waitMs);
     CloseHandle(h);
     return err;
+}
+
+DWORD TerminateTree(const Snapshot& snapshot, Identity root, Identity& failed) {
+    std::vector<const ProcessRow*> tree;
+    for (const auto& r : snapshot.rows)
+        if (r.pid == root.pid && r.createTime == root.createTime) tree.push_back(&r);
+    if (tree.empty()) return ERROR_NOT_FOUND;
+    for (size_t i = 0; i < tree.size(); ++i) // breadth-first; the create-time check also rules out cycles
+        for (const auto& r : snapshot.rows)
+            if (r.parentPid == tree[i]->pid && r.createTime > tree[i]->createTime) tree.push_back(&r);
+
+    DWORD first = ERROR_SUCCESS;
+    for (auto it = tree.rbegin(); it != tree.rend(); ++it) {
+        const DWORD err = TerminateProcessByIdentity((*it)->pid, (*it)->createTime, 2000);
+        if (err != ERROR_SUCCESS && err != ERROR_NOT_FOUND && first == ERROR_SUCCESS) {
+            first = err;
+            failed = {(*it)->pid, (*it)->createTime};
+        }
+    }
+    return first;
 }
 
 bool IsElevated() {

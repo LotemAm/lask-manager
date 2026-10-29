@@ -1,5 +1,6 @@
 #include "facts.h"
 
+#include <commctrl.h>
 #include <sddl.h>
 
 #include <cwchar>
@@ -18,6 +19,7 @@ constexpr ULONGLONG kEvictEveryMs = 10'000;
 
 struct Wanted {
     std::vector<Identity> ids;
+    std::vector<Identity> others;
     uint32_t kinds = 0;
     int iconSize = 16;
 };
@@ -92,6 +94,18 @@ public:
                 batch = std::make_unique<FactsBatch>();
             }
         }
+        for (const Identity& id : wanted.others) {
+            if (!stillWanted()) break;
+            Record& r = records_[id];
+            r.lastWanted = now;
+            if (r.facts && (r.facts->fetched & (kFactPath | kFactBasic))) continue;
+            r.facts = fetchPath(id, r.facts);
+            batch->push_back({id, r.facts, nullptr});
+            if (batch->size() >= kBatchSize) {
+                post(batch.release());
+                batch = std::make_unique<FactsBatch>();
+            }
+        }
         if (!batch->empty()) post(batch.release());
         evict(now);
     }
@@ -105,7 +119,7 @@ private:
     std::shared_ptr<const ProcessFacts> fetch(const Identity& id, const std::shared_ptr<const ProcessFacts>& previous,
                                               uint32_t missing) {
         auto f = std::make_shared<ProcessFacts>(previous ? *previous : ProcessFacts{});
-        f->fetched |= missing;
+        f->fetched |= missing | ((missing & kFactBasic) ? kFactPath : 0u);
 
         HANDLE h = id.pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, id.pid) : nullptr;
         if (h && !SameCreateTime(h, id.createTime)) {
@@ -122,6 +136,17 @@ private:
         }
         if ((missing & kFactCommandLine) && h) QueryCommandLine(h, f->commandLine);
         if (h) CloseHandle(h);
+        return f;
+    }
+
+    // Path only, without opening the process. There is no create-time check here: the PID is from
+    // the current snapshot, and a wrong guess only misfiles one row until its basic facts arrive.
+    std::shared_ptr<const ProcessFacts> fetchPath(const Identity& id,
+                                                  const std::shared_ptr<const ProcessFacts>& previous) {
+        auto f = std::make_shared<ProcessFacts>(previous ? *previous : ProcessFacts{});
+        f->fetched |= kFactPath;
+        std::wstring nt;
+        if (id.pid && QueryImageNtPath(id.pid, nt)) f->path = dosPath(nt);
         return f;
     }
 
@@ -288,11 +313,63 @@ void Enricher::stop() {
     state_.reset();
 }
 
-void Enricher::want(std::vector<Identity> ids, uint32_t kinds, int iconSize) {
+void Enricher::want(std::vector<Identity> ids, std::vector<Identity> others, uint32_t kinds, int iconSize) {
     if (!state_) return;
-    state_->wanted.store(std::make_shared<const Wanted>(Wanted{std::move(ids), kinds, iconSize}),
-                         std::memory_order_release);
+    state_->wanted.store(
+        std::make_shared<const Wanted>(Wanted{std::move(ids), std::move(others), kinds, iconSize}),
+        std::memory_order_release);
     SetEvent(state_->wake);
+}
+
+// ---- FactCache (UI thread) ---------------------------------------------------------------------
+
+FactCache::~FactCache() {
+    if (images_) ImageList_Destroy(images_);
+}
+
+const FactEntry* FactCache::find(const Identity& id) const {
+    auto it = entries_.find(id);
+    return it == entries_.end() ? nullptr : &it->second;
+}
+
+void FactCache::apply(FactsBatch* batch) {
+    for (const FactsUpdate& u : *batch) {
+        const std::wstring& path = u.facts->path;
+        if (u.icon && images_ && !iconByPath_.contains(path)) {
+            const int image = ImageList_AddIcon(images_, u.icon);
+            if (image >= 0) {
+                iconByPath_.emplace(path, image);
+                for (auto& [id, entry] : entries_)
+                    if (entry.facts && entry.facts->path == path) entry.image = image;
+            }
+        }
+        FactEntry& entry = entries_[u.id];
+        entry.facts = u.facts;
+        const auto icon = path.empty() ? iconByPath_.end() : iconByPath_.find(path);
+        entry.image = icon == iconByPath_.end() ? 0 : icon->second;
+    }
+    DestroyBatch(batch); // the image list keeps its own copies of the icons
+}
+
+void FactCache::sweep(const Snapshot& snapshot) {
+    std::unordered_set<Identity, IdentityHash> live;
+    live.reserve(snapshot.rows.size());
+    for (const auto& r : snapshot.rows) live.insert({r.pid, r.createTime});
+    std::erase_if(entries_, [&live](const auto& kv) { return !live.contains(kv.first); });
+}
+
+bool FactCache::createImages(UINT dpi) {
+    const int size = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    if (images_ && size == iconSize_) return false;
+    iconSize_ = size;
+    HIMAGELIST images = ImageList_Create(size, size, ILC_COLOR32 | ILC_MASK, 64, 64);
+    auto generic = static_cast<HICON>(LoadImageW(nullptr, IDI_APPLICATION, IMAGE_ICON, size, size, LR_SHARED));
+    ImageList_AddIcon(images, generic); // index 0: processes without an icon, or not fetched yet
+    if (images_) ImageList_Destroy(images_);
+    images_ = images;
+    iconByPath_.clear();
+    for (auto& [id, entry] : entries_) entry.image = 0;
+    return true;
 }
 
 } // namespace lask

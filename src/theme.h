@@ -30,6 +30,10 @@ struct Theme {
     COLORREF graphLine = 0;
     COLORREF graphFill = 0;
     COLORREF warning = 0;
+    // Heat-map cell backgrounds on the Processes tab, from barely busy (0) to very busy (last).
+    // All equal to `surface` in high contrast, where shading would fight the user's scheme.
+    static constexpr int kHeatLevels = 5;
+    COLORREF heat[kHeatLevels] = {};
 };
 
 // Reads AppsUseLightTheme and the DWM accent color from the registry (falls back to DWM APIs).

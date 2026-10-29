@@ -91,6 +91,7 @@ void FillHighContrast(Theme& t) {
     t.graphLine = GetSysColor(COLOR_HIGHLIGHT);
     t.graphFill = GetSysColor(COLOR_WINDOW);
     t.warning = GetSysColor(COLOR_HOTLIGHT);
+    for (auto& c : t.heat) c = t.surface;
 }
 
 // uxtheme exports these by ordinal only (Windows 10 1809+). Ordinal 135 changed meaning in 1903:
@@ -198,6 +199,11 @@ Theme ReadTheme() {
     t.selectionText = t.text;
     t.headerBackground = t.surface;
     t.graphFill = Mix(t.surface, t.graphLine, 20);
+
+    // Task Manager's yellow-to-orange heat cells, toned down on dark so white text stays readable.
+    const COLORREF heatLow = t.dark ? RGB(70, 58, 22) : RGB(255, 244, 196);
+    const COLORREF heatHigh = t.dark ? RGB(150, 66, 18) : RGB(255, 160, 80);
+    for (int i = 0; i < Theme::kHeatLevels; ++i) t.heat[i] = Mix(heatLow, heatHigh, i * 100 / (Theme::kHeatLevels - 1));
     return t;
 }
 

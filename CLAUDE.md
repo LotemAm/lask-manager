@@ -2,8 +2,8 @@
 
 Lightweight Task Manager replacement for Windows (`lask.exe`). C++23, raw Win32 + common controls,
 CMake, MSVC. The design is `docs/design.md`; read it before changing architecture. The milestone
-order is in its "Build order" section; milestones 1-3 (kill-only MVP, theme, enrichment) are done
-and milestone 4 (Processes tab) is next.
+order is in its "Build order" section; milestones 1-4 (kill-only MVP, theme, enrichment, Processes
+tab) are done and milestone 5 (Performance tab) is next.
 
 ## Build and run
 
@@ -26,7 +26,11 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 - One `NtQuerySystemInformation(SystemProcessInformation)` call per tick is the only per-tick
   kernel work. No WMI, no PDH process counters, no Toolhelp32, no EnumProcesses loop, no
   OpenProcess on the hot path. Per-process facts (icons, descriptions, user, command line) are
-  lazy, cached, and fetched only for rows on screen.
+  lazy, cached, and fetched only for rows on screen. One deliberate exception: grouping needs every
+  process's image path, so processes with no facts yet get a path-only lookup by PID
+  (`kFactPath`, `SystemProcessIdInformation`, no OpenProcess), once per process, after the
+  visible rows. While the Processes tab is visible the sampler also does one `EnumWindows` per
+  tick (titles via `InternalGetWindowText`, which never sends a message to a hung app).
 - A process is identified by `(pid, createTime)`, never by pid alone. Kills verify the create time.
 - Snapshots are immutable once published (`std::atomic<std::shared_ptr<const Snapshot>>`). The UI
   keeps the newest and the previous one; rates are `(current - previous) / elapsed`.
@@ -45,14 +49,22 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 
 ## Conventions
 
-- Files: `snapshot.*` (data), `facts.*` (lazy per-process facts, enrichment thread), `theme.*`
-  (look), `main.cpp` (window). New tabs get their own file.
+- Files: `snapshot.*` (data), `facts.*` (lazy per-process facts, enrichment thread, UI-side
+  `FactCache`), `theme.*` (look), `ui.*` (what every grid shares: `Chrome` fonts + palette, the
+  dark header, accent selection, filter match), `processes.*` (Processes tab), `main.cpp` (window,
+  nav, Details tab, actions). New tabs get their own file, as a class that holds a `const Chrome&`.
 - Namespace `lask`. `g` in main.cpp is the single UI-thread state object; nothing else touches it.
+  Tabs get what they need by reference at construction (`Chrome`, `FactCache`, the filter buffer).
+- Every tab rebuilds on every tick, visible or not, so no tab ever holds a `FactEntry*` across a
+  `FactCache::sweep()`. The Details grid is created on first show (startup cost); until then it
+  does no work at all.
 - UTF-16 everywhere (`UNICODE`), `swprintf_s` into fixed buffers on the paint path; no
   `std::wstring` allocation per row per tick.
 - Colors come from `lask::Theme`; never hard-code a COLORREF outside `theme.cpp`.
 - Measure startup when touching anything on the startup path: `Measure-Command { .\lask.exe }`
-  under a CPU + memory hog. Target: under 300 ms idle, under 1.5 s loaded.
+  under a CPU + memory hog. Target: under 300 ms idle, under 1.5 s loaded. Each ListView costs
+  7-12 ms to create, so don't create one the first screen doesn't show. The sampler starts in
+  `WM_CREATE` so the first snapshot is ready the moment the empty window has painted.
 
 ## Win32 traps already hit
 
@@ -61,7 +73,15 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 - ListView sub-item indices must stay dense (`< column count`); a column whose `iSubItem` is past
   the count blanks the whole grid. Hence `App::columns` and the rebuild in `ToggleColumn`.
 - Selected-row colors: clear `CDIS_SELECTED | CDIS_HOT | CDIS_FOCUS` in `CDDS_ITEMPREPAINT` and set
-  `clrTextBk`; that fills every cell, icon included, so no manual `FillRect` is needed.
+  `clrTextBk`; that fills every cell, icon included, so no manual `FillRect` is needed. With
+  `CDRF_NOTIFYSUBITEMDRAW` this has to be repeated at the sub-item stage; `CLR_NONE` as a
+  sub-item `clrTextBk` keeps the theme's hover highlight.
+- `TerminateProcess` fails with access denied on a process that is already exiting (a parent that
+  quit when its child was ended). With a `PROCESS_TERMINATE` handle in hand that means success.
+- A one-column ListView (the nav) draws a column separator at the column's right edge unless the
+  column is exactly as wide as the control.
+- `Process.CloseMainWindow()` in a test script closes a message box, not the app, if one is up: a
+  test that hangs on exit usually means the app showed an error.
 
 ## Known cosmetic items
 
@@ -70,10 +90,17 @@ installer update is running; build from `vcvars64.bat` with `cmake --preset ninj
 - The filter matches descriptions, users and paths only for processes whose facts were already
   fetched (i.e. that have been on screen); names and PIDs always match.
 - Light theme and high contrast are implemented but have only been checked by reading the code.
+- UWP apps show up as "Application Frame Host" in Apps: the frame window belongs to that process,
+  and mapping it to the app's own process (Task Manager does) is not done.
+- During the first second the Processes groups settle: a process is "Background" until its path
+  arrives and puts it under Windows processes.
+- Working set is ~23 MB with ~970 processes (design target: 20 MB at 400). Startup to first rows
+  is ~15 ms slower than milestone 1 because the first screen now has two ListViews (grid + nav).
 
 ## Not yet done (from the design)
 
-Processes tab grouping, Performance graphs (Direct2D child window + 300-sample ring buffers,
-30 s / 1 min / 5 min views), Services tab, End process tree, Open file location, "Not responding"
-status, column layout persistence, tray-resident mode, IFEO "replace Task Manager" option,
-`--bench` flag, I/O priority boost via `NtSetInformationProcess(ProcessIoPriority)`.
+Performance graphs (Direct2D child window + 300-sample ring buffers, 30 s / 1 min / 5 min views),
+Services tab, GPU column, Properties, column layout persistence, Processes column picker,
+"Not responding" on the Details tab (window info is only gathered while Processes is visible),
+tray-resident mode, IFEO "replace Task Manager" option, `--bench` flag, I/O priority boost via
+`NtSetInformationProcess(ProcessIoPriority)`.

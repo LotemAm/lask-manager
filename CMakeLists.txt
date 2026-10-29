@@ -17,8 +17,10 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 add_executable(lask WIN32
   src/main.cpp
   src/facts.cpp
+  src/processes.cpp
   src/snapshot.cpp
   src/theme.cpp
+  src/ui.cpp
   src/lask.rc
   src/app.manifest)   # CMake merges a .manifest source into the linker-generated manifest
 

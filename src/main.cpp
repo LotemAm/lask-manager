@@ -1,15 +1,19 @@
-// Lask Manager - Details tab: open instantly, list processes, end the selected one.
+// Lask Manager - the window: left navigation, the Processes and Details tabs, the filter box, and
+// the actions (end task, end tree, open file location).
 //
 // Thread model (see docs/design.md): the UI thread owns the window and only ever reads the newest
 // snapshot; the sampler thread does the one kernel query per tick; the enrichment thread fills in
-// per-process facts for the rows on screen; kills run on a throwaway worker.
+// per-process facts for the rows on screen; kills and shell calls run on throwaway workers.
 
 #include "facts.h"
+#include "processes.h"
 #include "snapshot.h"
 #include "theme.h"
+#include "ui.h"
 
 #include <windows.h>
 #include <commctrl.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
@@ -22,7 +26,6 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -31,13 +34,38 @@ constexpr UINT kMsgSnapshot = WM_APP + 1;
 constexpr UINT kMsgKillDone = WM_APP + 2;
 constexpr UINT kMsgFacts = WM_APP + 3;
 constexpr UINT_PTR kTimerDeferredAdopt = 1;
-constexpr int kListId = 100;
+constexpr int kListId = 100; // the Details grid
 constexpr int kFilterId = 101;
+constexpr int kProcessesId = 102;
+constexpr int kNavId = 103;
 constexpr unsigned kDefaultIntervalMs = 1000;
-constexpr int kLookahead = 16;   // rows above and below the visible page whose facts are fetched too
-constexpr uint32_t kEvictEvery = 16; // ticks between sweeps of the UI-side fact cache
+constexpr int kLookahead = 16;      // rows above and below the visible page whose facts are fetched too
+constexpr uint32_t kSweepEvery = 16; // ticks between sweeps of the UI-side fact cache
+constexpr int kNavWidth = 172;       // at 96 dpi
 
-enum Command : int { kCmdEndTask = 1001, kCmdRefresh, kCmdRestartAdmin, kCmdFind, kCmdColumnBase = 1100 };
+enum Command : int {
+    kCmdEndTask = 1001,
+    kCmdEndTree,
+    kCmdOpenLocation,
+    kCmdGoToDetails,
+    kCmdSwitchTo,
+    kCmdRefresh,
+    kCmdRestartAdmin,
+    kCmdFind,
+    kCmdNextTab,
+    kCmdTabProcesses,
+    kCmdTabDetails,
+    kCmdColumnBase = 1100
+};
+
+enum class Tab : int { Processes, Details, Count };
+
+struct NavItem {
+    const wchar_t* glyph; // Segoe Fluent Icons / MDL2 code point
+    const wchar_t* label;
+};
+constexpr NavItem kNav[] = {{L"\xE71D", L"Processes"}, {L"\xE8FD", L"Details"}};
+static_assert(std::size(kNav) == static_cast<size_t>(Tab::Count));
 
 // Every column the Details grid can show. App::columns maps the ListView's sub-item indices to these;
 // Name is always sub-item 0, the item column, and cannot be hidden.
@@ -48,6 +76,7 @@ enum class Column : int {
     User,
     Cpu,
     Memory,
+    Disk,
     Description,
     CommandLine,
     ImagePath,
@@ -70,10 +99,11 @@ constexpr ColumnSpec kColumns[] = {
     {L"Name", 220, false, true},          {L"PID", 64, true, true},
     {L"Status", 84, false, true},         {L"User name", 110, false, true},
     {L"CPU", 60, true, true},             {L"Memory", 96, true, true},
-    {L"Description", 240, false, true},   {L"Command line", 360, false, false},
-    {L"Image path", 300, false, false},   {L"Elevated", 72, false, false},
-    {L"Architecture", 92, false, false},  {L"Threads", 70, true, false},
-    {L"Handles", 76, true, false},        {L"Priority", 92, false, false},
+    {L"Disk", 90, true, false},           {L"Description", 240, false, true},
+    {L"Command line", 360, false, false}, {L"Image path", 300, false, false},
+    {L"Elevated", 72, false, false},      {L"Architecture", 92, false, false},
+    {L"Threads", 70, true, false},        {L"Handles", 76, true, false},
+    {L"Priority", 92, false, false},
 };
 static_assert(std::size(kColumns) == static_cast<size_t>(Column::Count));
 
@@ -81,17 +111,10 @@ constexpr int Index(Column c) {
     return static_cast<int>(c);
 }
 
-// UI-side copy of what the enrichment thread found for one process identity.
-struct FactEntry {
-    std::shared_ptr<const lask::ProcessFacts> facts;
-    int image = 0;         // index into App::images; 0 is the generic application icon
-    uint32_t lastSeen = 0; // App::tick when the process was last in a snapshot
-};
-
 struct ViewRow {
-    const lask::ProcessRow* row; // points into App::current, rebuilt whenever it changes
-    double cpu;                  // percent of all logical CPUs; < 0 until two snapshots exist
-    const FactEntry* entry;      // null until the enrichment thread has reported on this process
+    const lask::ProcessRow* row;   // points into App::current, rebuilt whenever it changes
+    const lask::RowRates* rate;    // points into App::rates, same lifetime
+    const lask::FactEntry* entry;  // null until the enrichment thread has reported on this process
 };
 
 struct KillResult {
@@ -102,24 +125,23 @@ struct KillResult {
 
 struct App {
     HWND hwnd = nullptr;
-    HWND list = nullptr;
+    HWND list = nullptr; // the Details grid; created the first time the tab is shown
     HWND filter = nullptr;
-    HFONT font = nullptr;
-    int fontHeight = 16;
+    HWND nav = nullptr;
+    HIMAGELIST navRows = nullptr; // a 1-pixel-wide image list whose height sets the nav row height
     HBRUSH background = nullptr;
     HBRUSH surface = nullptr;
-    HIMAGELIST images = nullptr;
-    int iconSize = 16;
-    UINT dpi = 96;
     bool elevated = false;
-    lask::Theme theme;
+    lask::Chrome chrome;
+    lask::FactCache facts;
     lask::Sampler sampler;
     lask::Enricher enricher;
+    lask::ProcessesTab processes{chrome, facts, filterText};
+    Tab tab = Tab::Processes;
     std::shared_ptr<const lask::Snapshot> current;
     std::shared_ptr<const lask::Snapshot> previous;
-    std::vector<ViewRow> view;
-    std::unordered_map<lask::Identity, FactEntry, lask::IdentityHash> facts;
-    std::unordered_map<std::wstring, int> iconByPath;
+    std::vector<lask::RowRates> rates; // aligned with current->rows
+    std::vector<ViewRow> view;         // the Details grid's rows
     uint32_t tick = 0;
     int wantedTop = -1;
     Column sortColumn = Column::Cpu;
@@ -135,7 +157,7 @@ struct App {
 App g;
 
 int Scale(int px) {
-    return MulDiv(px, static_cast<int>(g.dpi), 96);
+    return g.chrome.scale(px);
 }
 
 template <class T>
@@ -143,12 +165,11 @@ int Compare(const T& a, const T& b) {
     return a < b ? -1 : (b < a ? 1 : 0);
 }
 
-void FillSolid(HDC dc, const RECT& rc, COLORREF color) {
-    SetDCBrushColor(dc, color);
-    FillRect(dc, &rc, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+HWND ActiveGrid() {
+    return g.tab == Tab::Processes ? g.processes.grid() : g.list;
 }
 
-// ---- cell values -------------------------------------------------------------------------------
+// ---- Details: cell values ----------------------------------------------------------------------
 
 Column ColumnAt(int subItem) {
     return subItem >= 0 && subItem < static_cast<int>(g.columns.size()) ? g.columns[subItem] : Column::Count;
@@ -201,8 +222,9 @@ const wchar_t* StringValue(const ViewRow& v, Column c) {
 int CompareRows(const ViewRow& a, const ViewRow& b, Column c) {
     switch (c) {
     case Column::Pid: return Compare(a.row->pid, b.row->pid);
-    case Column::Cpu: return Compare(a.cpu, b.cpu);
+    case Column::Cpu: return Compare(a.rate->cpu, b.rate->cpu);
     case Column::Memory: return Compare(a.row->privateWorkingSet, b.row->privateWorkingSet);
+    case Column::Disk: return Compare(a.rate->diskBytesPerSec, b.rate->diskBytesPerSec);
     case Column::Threads: return Compare(a.row->threadCount, b.row->threadCount);
     case Column::Handles: return Compare(a.row->handleCount, b.row->handleCount);
     case Column::Priority: return Compare(a.row->basePriority, b.row->basePriority);
@@ -210,25 +232,7 @@ int CompareRows(const ViewRow& a, const ViewRow& b, Column c) {
     }
 }
 
-bool Contains(const wchar_t* haystack, const wchar_t* needle) {
-    return haystack && *haystack && FindStringOrdinal(FIND_FROMSTART, haystack, -1, needle, -1, TRUE) >= 0;
-}
-
-// The filter matches what the user can see: name, PID, and any fact already fetched. A process
-// whose description has never been on screen matches only by name until it has been.
-bool MatchesFilter(const ViewRow& v) {
-    const wchar_t* needle = g.filterText;
-    if (!needle[0]) return true;
-    if (Contains(v.row->name, needle)) return true;
-    wchar_t pid[16];
-    swprintf_s(pid, L"%u", v.row->pid);
-    if (Contains(pid, needle)) return true;
-    const lask::ProcessFacts* f = FactsOf(v);
-    return f && (Contains(f->description.c_str(), needle) || Contains(f->user.c_str(), needle) ||
-                 Contains(f->path.c_str(), needle) || Contains(f->commandLine.c_str(), needle));
-}
-
-// ---- view: the sorted, filtered, rate-annotated list the grid shows --------------------------
+// ---- Details: the sorted, filtered list the grid shows -------------------------------------------
 
 void SortView() {
     const Column column = g.sortColumn;
@@ -240,45 +244,15 @@ void SortView() {
     });
 }
 
-FactEntry* FindFacts(const lask::ProcessRow& r) {
-    auto it = g.facts.find({r.pid, r.createTime});
-    return it == g.facts.end() ? nullptr : &it->second;
-}
-
 void RebuildView() {
     g.view.clear();
     if (!g.current) return;
-    const lask::Snapshot& cur = *g.current;
-    ++g.tick;
-
-    std::unordered_map<uint32_t, const lask::ProcessRow*> previousByPid;
-    double denominator = 0.0;
-    if (g.previous) {
-        const uint64_t elapsed = cur.elapsed100ns(*g.previous);
-        if (elapsed) denominator = static_cast<double>(elapsed) * cur.logicalCpus;
-        previousByPid.reserve(g.previous->rows.size());
-        for (const auto& r : g.previous->rows) previousByPid.emplace(r.pid, &r);
+    const auto& rows = g.current->rows;
+    g.view.reserve(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const ViewRow v{&rows[i], &g.rates[i], g.facts.find({rows[i].pid, rows[i].createTime})};
+        if (lask::MatchesFilter(*v.row, FactsOf(v), g.filterText)) g.view.push_back(v);
     }
-
-    g.view.reserve(cur.rows.size());
-    for (const auto& r : cur.rows) {
-        double cpu = -1.0;
-        if (denominator > 0.0) {
-            if (auto it = previousByPid.find(r.pid); it != previousByPid.end() && it->second->createTime == r.createTime) {
-                const uint64_t delta = r.cpuTime >= it->second->cpuTime ? r.cpuTime - it->second->cpuTime : 0;
-                cpu = std::clamp(100.0 * static_cast<double>(delta) / denominator, 0.0, 100.0);
-            }
-        }
-        FactEntry* entry = FindFacts(r);
-        if (entry) entry->lastSeen = g.tick;
-        const ViewRow v{&r, cpu, entry};
-        if (MatchesFilter(v)) g.view.push_back(v);
-    }
-
-    // Facts of processes that have exited. Every live one was just stamped, filtered out or not,
-    // so nothing erased here is referenced by the view.
-    if (g.tick % kEvictEvery == 0)
-        std::erase_if(g.facts, [](const auto& kv) { return kv.second.lastSeen != g.tick; });
     SortView();
 }
 
@@ -301,44 +275,52 @@ void RestoreSelection(const std::optional<lask::Identity>& selected) {
     if (idx >= 0) ListView_SetItemState(g.list, idx, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
 }
 
-void RedrawVisibleRows() {
-    const int top = ListView_GetTopIndex(g.list);
-    const int page = ListView_GetCountPerPage(g.list);
-    ListView_RedrawItems(g.list, top, top + page);
-}
-
-// Tells the enrichment thread which processes are on screen: the visible page first, then a few
-// rows of lookahead below and above, so scrolling a little finds the facts already there.
-void PublishWanted() {
-    if (!g.enricher.running() || g.view.empty()) return;
-    const int count = static_cast<int>(g.view.size());
-    const int top = std::clamp(ListView_GetTopIndex(g.list), 0, count - 1);
-    const int end = std::min(count, top + ListView_GetCountPerPage(g.list) + 1);
-    g.wantedTop = top;
-
-    std::vector<lask::Identity> ids;
-    ids.reserve(static_cast<size_t>(end - top + 2 * kLookahead));
-    auto add = [&ids](int i) { ids.push_back({g.view[i].row->pid, g.view[i].row->createTime}); };
-    for (int i = top; i < end; ++i) add(i);
-    for (int i = end; i < std::min(count, end + kLookahead); ++i) add(i);
-    for (int i = top - 1; i >= std::max(0, top - kLookahead); --i) add(i);
-
-    const uint32_t kinds = lask::kFactBasic | (g.columnVisible[Index(Column::CommandLine)] ? lask::kFactCommandLine : 0u);
-    g.enricher.want(std::move(ids), kinds, g.iconSize);
-}
-
-void PublishWantedIfScrolled() {
-    if (ListView_GetTopIndex(g.list) != g.wantedTop) PublishWanted();
+void RedrawVisibleRows(HWND grid) {
+    if (!grid) return;
+    const int top = ListView_GetTopIndex(grid);
+    ListView_RedrawItems(grid, top, top + ListView_GetCountPerPage(grid));
 }
 
 // Only the visible rows are invalidated; the control asks for their text through LVN_GETDISPINFO.
-void ApplyView() {
+void ApplyDetails() {
+    if (!g.list) return; // never shown yet: nothing to keep up to date
     const auto selected = SelectedIdentity();
     RebuildView();
     ListView_SetItemCountEx(g.list, static_cast<int>(g.view.size()), LVSICF_NOSCROLL | LVSICF_NOINVALIDATEALL);
     RestoreSelection(selected);
-    RedrawVisibleRows();
-    PublishWanted();
+    RedrawVisibleRows(g.list);
+}
+
+void AppendDetailsVisible(std::vector<lask::Identity>& ids) {
+    if (g.view.empty()) return;
+    const int count = static_cast<int>(g.view.size());
+    const int top = std::clamp(ListView_GetTopIndex(g.list), 0, count - 1);
+    const int end = std::min(count, top + ListView_GetCountPerPage(g.list) + 1);
+    auto add = [&ids](int i) { ids.push_back({g.view[i].row->pid, g.view[i].row->createTime}); };
+    for (int i = top; i < end; ++i) add(i);
+    for (int i = end; i < std::min(count, end + kLookahead); ++i) add(i);
+    for (int i = top - 1; i >= std::max(0, top - kLookahead); --i) add(i);
+}
+
+// Tells the enrichment thread what is on screen (the visible page first, then a few rows of
+// lookahead) and which processes it has never reported on, whose paths the grouping needs.
+void PublishWanted() {
+    if (!g.enricher.running() || !g.current) return;
+    std::vector<lask::Identity> ids;
+    if (g.tab == Tab::Processes) g.processes.appendVisible(ids);
+    else AppendDetailsVisible(ids);
+    g.wantedTop = ListView_GetTopIndex(ActiveGrid());
+
+    std::vector<lask::Identity> others;
+    for (const auto& r : g.current->rows)
+        if (!g.facts.find({r.pid, r.createTime})) others.push_back({r.pid, r.createTime});
+
+    const uint32_t kinds = lask::kFactBasic | (g.columnVisible[Index(Column::CommandLine)] ? lask::kFactCommandLine : 0u);
+    g.enricher.want(std::move(ids), std::move(others), kinds, g.facts.iconSize());
+}
+
+void PublishWantedIfScrolled() {
+    if (ListView_GetTopIndex(ActiveGrid()) != g.wantedTop) PublishWanted();
 }
 
 bool IsInteracting() {
@@ -350,9 +332,13 @@ void AdoptLatestSnapshot() {
     if (!latest || latest == g.current) return;
     g.previous = std::move(g.current);
     g.current = std::move(latest);
+    lask::ComputeRates(*g.current, g.previous.get(), g.rates);
+    if (++g.tick % kSweepEvery == 0) g.facts.sweep(*g.current); // before the views take new pointers
     // Enrichment starts with the second tick, so icons and descriptions never delay the list.
     if (g.previous && !g.enricher.running()) g.enricher.start(g.hwnd, kMsgFacts);
-    ApplyView();
+    ApplyDetails();
+    g.processes.update(g.current, &g.rates);
+    PublishWanted();
 }
 
 // A snapshot that lands while the mouse is down or a menu is open waits: the row under the cursor
@@ -365,55 +351,15 @@ void OnSnapshot() {
     AdoptLatestSnapshot();
 }
 
-// ---- facts and icons -----------------------------------------------------------------------------
-
-void CreateImageList() {
-    const int size = GetSystemMetricsForDpi(SM_CXSMICON, g.dpi);
-    if (g.images && size == g.iconSize) return; // the worker only resends icons when the size changes
-    g.iconSize = size;
-    HIMAGELIST images = ImageList_Create(g.iconSize, g.iconSize, ILC_COLOR32 | ILC_MASK, 64, 64);
-    auto generic = static_cast<HICON>(
-        LoadImageW(nullptr, IDI_APPLICATION, IMAGE_ICON, g.iconSize, g.iconSize, LR_SHARED));
-    ImageList_AddIcon(images, generic); // index 0: processes without an icon, or not fetched yet
-    ListView_SetImageList(g.list, images, LVSIL_SMALL);
-    if (g.images) ImageList_Destroy(g.images);
-    g.images = images;
-
-    // Every icon has to come again at the new size; the enrichment thread notices the size change.
-    g.iconByPath.clear();
-    for (auto& [id, entry] : g.facts) entry.image = 0;
-}
-
 void OnFacts(lask::FactsBatch* batch) {
-    for (const lask::FactsUpdate& u : *batch) {
-        const std::wstring& path = u.facts->path;
-        if (u.icon && !g.iconByPath.contains(path)) {
-            const int image = ImageList_AddIcon(g.images, u.icon);
-            if (image >= 0) {
-                g.iconByPath.emplace(path, image);
-                for (auto& [id, entry] : g.facts)
-                    if (entry.facts && entry.facts->path == path) entry.image = image;
-            }
-        }
-        FactEntry& entry = g.facts[u.id];
-        entry.facts = u.facts;
-        entry.lastSeen = g.tick;
-        const auto icon = g.iconByPath.find(path);
-        entry.image = icon == g.iconByPath.end() ? 0 : icon->second;
-    }
-    lask::DestroyBatch(batch); // the image list keeps its own copies of the icons
-
-    // unordered_map never moves its elements, so rows that already point at an entry stay valid.
+    g.facts.apply(batch);
     for (ViewRow& v : g.view)
-        if (!v.entry) v.entry = FindFacts(*v.row);
-    RedrawVisibleRows();
+        if (!v.entry) v.entry = g.facts.find({v.row->pid, v.row->createTime});
+    RedrawVisibleRows(g.list);
+    g.processes.factsArrived();
 }
 
-// ---- grid -------------------------------------------------------------------------------------
-
-void FormatMemory(uint64_t bytes, wchar_t* out, size_t count) {
-    swprintf_s(out, count, L"%.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
-}
+// ---- Details: grid -------------------------------------------------------------------------------
 
 void OnGetDispInfo(NMLVDISPINFOW* info) {
     LVITEMW& item = info->item;
@@ -431,10 +377,14 @@ void OnGetDispInfo(NMLVDISPINFOW* info) {
     switch (column) {
     case Column::Pid: swprintf_s(out, n, L"%u", v.row->pid); break;
     case Column::Cpu:
-        if (v.cpu < 0) wcscpy_s(out, n, L"—");
-        else swprintf_s(out, n, L"%.1f%%", v.cpu);
+        if (v.rate->cpu < 0) wcscpy_s(out, n, L"—");
+        else swprintf_s(out, n, L"%.1f%%", v.rate->cpu);
         break;
-    case Column::Memory: FormatMemory(v.row->privateWorkingSet, out, n); break;
+    case Column::Memory: lask::FormatMemory(v.row->privateWorkingSet, out, n); break;
+    case Column::Disk:
+        if (v.rate->diskBytesPerSec < 0) out[0] = L'\0';
+        else swprintf_s(out, n, L"%.1f MB/s", v.rate->diskBytesPerSec / (1024.0 * 1024.0));
+        break;
     case Column::Threads: swprintf_s(out, n, L"%u", v.row->threadCount); break;
     case Column::Handles: swprintf_s(out, n, L"%u", v.row->handleCount); break;
     default: item.pszText = const_cast<wchar_t*>(StringValue(v, column)); return;
@@ -453,23 +403,10 @@ LRESULT OnFindItem(const NMLVFINDITEMW* find) {
     return -1;
 }
 
-// Selected rows get the accent-tinted palette color instead of the theme's grey highlight.
-LRESULT DrawListItem(NMLVCUSTOMDRAW* cd) {
+LRESULT DrawDetailsItem(NMLVCUSTOMDRAW* cd) {
     switch (cd->nmcd.dwDrawStage) {
     case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
-    case CDDS_ITEMPREPAINT: {
-        const int i = static_cast<int>(cd->nmcd.dwItemSpec);
-        if (!(ListView_GetItemState(g.list, i, LVIS_SELECTED) & LVIS_SELECTED)) return CDRF_DODEFAULT;
-        const bool hot = (cd->nmcd.uItemState & CDIS_HOT) != 0;
-        const COLORREF fill = GetFocus() != g.list ? g.theme.selectionInactive
-                              : hot                ? g.theme.selectionHot
-                                                   : g.theme.selection;
-        // With the selected state cleared the theme draws a plain row on top of our fill.
-        cd->nmcd.uItemState &= ~(CDIS_SELECTED | CDIS_HOT | CDIS_FOCUS);
-        cd->clrTextBk = fill;
-        cd->clrText = g.theme.selectionText;
-        return CDRF_NEWFONT;
-    }
+    case CDDS_ITEMPREPAINT: return lask::PaintSelectedRow(cd, g.list, g.chrome.theme) ? CDRF_NEWFONT : CDRF_DODEFAULT;
     default: return CDRF_DODEFAULT;
     }
 }
@@ -495,7 +432,7 @@ void Resort() {
     const auto selected = SelectedIdentity();
     SortView();
     RestoreSelection(selected);
-    RedrawVisibleRows();
+    RedrawVisibleRows(g.list);
     PublishWanted();
 }
 
@@ -533,7 +470,7 @@ void ToggleColumn(Column column) {
     std::vector<Column> shown; // display order
     for (int i : order) {
         const Column c = g.columns[i];
-        g.columnWidth[Index(c)] = MulDiv(ListView_GetColumnWidth(g.list, i), 96, static_cast<int>(g.dpi));
+        g.columnWidth[Index(c)] = MulDiv(ListView_GetColumnWidth(g.list, i), 96, static_cast<int>(g.chrome.dpi));
         if (c != column) shown.push_back(c);
     }
     const bool show = !g.columnVisible[Index(column)];
@@ -569,72 +506,90 @@ void ShowColumnMenu() {
     DestroyMenu(menu);
 }
 
-// The header control is the one piece the DarkMode_Explorer theme leaves light, so draw it ourselves
-// through its documented NM_CUSTOMDRAW. The header's parent is the ListView, hence the subclass.
-void FillHeaderRect(HDC dc, const RECT& rc, COLORREF fill) {
-    FillSolid(dc, rc, fill);
-    FillSolid(dc, {rc.left, rc.bottom - 1, rc.right, rc.bottom}, g.theme.border);
+void SelectInDetails(const lask::Identity& id) {
+    int index = IndexOf(id);
+    if (index < 0 && g.filterText[0]) {
+        SetWindowTextW(g.filter, L""); // the filter hid it; EN_CHANGE rebuilds the view
+        index = IndexOf(id);
+    }
+    ListView_SetItemState(g.list, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    if (index < 0) return;
+    ListView_SetItemState(g.list, index, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(g.list, index, FALSE);
 }
 
-LRESULT DrawHeader(NMCUSTOMDRAW* cd) {
-    switch (cd->dwDrawStage) {
-    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
-    case CDDS_POSTPAINT: {
-        // The theme leaves the filler right of the last column light; paint it to match.
-        HWND header = cd->hdr.hwndFrom;
-        RECT client{};
-        GetClientRect(header, &client);
-        LONG left = client.left;
-        for (int i = 0, n = Header_GetItemCount(header); i < n; ++i) {
-            RECT item{};
-            if (Header_GetItemRect(header, i, &item)) left = std::max(left, item.right);
-        }
-        if (left < client.right)
-            FillHeaderRect(cd->hdc, {left, client.top, client.right, client.bottom}, g.theme.headerBackground);
-        return CDRF_DODEFAULT;
-    }
+// ---- navigation and tabs -------------------------------------------------------------------------
+
+void EnsureDetails();
+
+void ShowTab(Tab tab) {
+    if (tab == Tab::Details) EnsureDetails();
+    const bool focusGrid = GetFocus() != g.nav;
+    const bool switched = tab != g.tab;
+    g.tab = tab;
+    ShowWindow(g.processes.grid(), tab == Tab::Processes ? SW_SHOW : SW_HIDE);
+    if (g.list) ShowWindow(g.list, tab == Tab::Details ? SW_SHOW : SW_HIDE);
+    // Window titles and the hung check only cost anything while someone is looking at them.
+    g.sampler.setWantWindows(tab == Tab::Processes);
+    if (switched && tab == Tab::Processes) g.sampler.requestNow(); // titles for the Apps group now
+    ListView_SetItemState(g.nav, static_cast<int>(tab), LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    InvalidateRect(g.nav, nullptr, FALSE);
+    if (focusGrid) SetFocus(ActiveGrid());
+    PublishWanted();
+}
+
+void OnNavChanged(const NMLISTVIEW* change) {
+    if (!(change->uChanged & LVIF_STATE) || !(change->uNewState & LVIS_SELECTED)) return;
+    if (change->iItem >= 0 && change->iItem < static_cast<int>(Tab::Count) && change->iItem != static_cast<int>(g.tab))
+        ShowTab(static_cast<Tab>(change->iItem));
+}
+
+void RoundFill(HDC dc, const RECT& rc, int radius, COLORREF color) {
+    SetDCBrushColor(dc, color);
+    SetDCPenColor(dc, color);
+    HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+}
+
+// Windows 11 navigation look: a rounded pill behind the current and hovered item, an accent bar on
+// the current one, a Fluent glyph and the label.
+LRESULT DrawNav(NMLVCUSTOMDRAW* cd) {
+    const lask::Theme& theme = g.chrome.theme;
+    switch (cd->nmcd.dwDrawStage) {
+    case CDDS_PREPAINT: return CDRF_NOTIFYITEMDRAW;
     case CDDS_ITEMPREPAINT: {
-        HDC dc = cd->hdc;
-        const RECT rc = cd->rc;
+        const int i = static_cast<int>(cd->nmcd.dwItemSpec);
+        if (i < 0 || i >= static_cast<int>(Tab::Count)) return CDRF_SKIPDEFAULT;
+        HDC dc = cd->nmcd.hdc;
+        RECT rc{};
+        rc.left = LVIR_BOUNDS;
+        SendMessageW(g.nav, LVM_GETITEMRECT, static_cast<WPARAM>(i), reinterpret_cast<LPARAM>(&rc));
+        RECT client{};
+        GetClientRect(g.nav, &client);
+        rc.left = client.left;
+        rc.right = client.right;
+        lask::FillSolid(dc, rc, theme.background);
 
-        wchar_t title[64] = {};
-        HDITEMW hi{};
-        hi.mask = HDI_TEXT | HDI_FORMAT;
-        hi.pszText = title;
-        hi.cchTextMax = static_cast<int>(std::size(title));
-        Header_GetItem(cd->hdr.hwndFrom, static_cast<int>(cd->dwItemSpec), &hi);
-        const bool sorted = (hi.fmt & (HDF_SORTUP | HDF_SORTDOWN)) != 0;
-
-        const COLORREF fill = (cd->uItemState & CDIS_SELECTED) ? g.theme.headerPressed
-                              : (cd->uItemState & CDIS_HOT)    ? g.theme.headerHot
-                                                               : g.theme.headerBackground;
-        FillHeaderRect(dc, rc, fill);
-        if (sorted) FillSolid(dc, {rc.left + Scale(1), rc.bottom - Scale(2), rc.right - Scale(1), rc.bottom}, g.theme.accentText);
-
-        HGDIOBJ oldFont = SelectObject(dc, g.font);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, sorted ? g.theme.text : g.theme.textSecondary);
-        RECT textRect = rc;
-        textRect.left += Scale(6);
-        textRect.right -= Scale(6);
-        const UINT format = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX |
-                            ((hi.fmt & HDF_RIGHT) ? DT_RIGHT : DT_LEFT);
-        DrawTextW(dc, title, -1, &textRect, format);
-
-        if (sorted) {
-            const int cx = (rc.left + rc.right) / 2;
-            const int top = rc.top + Scale(2);
-            const int s = Scale(3);
-            POINT up[3] = {{cx - s, top + s}, {cx + s, top + s}, {cx, top}};
-            POINT down[3] = {{cx - s, top}, {cx + s, top}, {cx, top + s}};
-            SetDCBrushColor(dc, g.theme.accentText);
-            SetDCPenColor(dc, g.theme.accentText);
-            HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
-            HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
-            Polygon(dc, (hi.fmt & HDF_SORTUP) ? up : down, 3);
-            SelectObject(dc, oldBrush);
-            SelectObject(dc, oldPen);
+        const bool current = i == static_cast<int>(g.tab);
+        const bool hot = (cd->nmcd.uItemState & CDIS_HOT) != 0;
+        RECT pill = {rc.left + Scale(4), rc.top + Scale(2), rc.right - Scale(4), rc.bottom - Scale(2)};
+        if (current || hot) RoundFill(dc, pill, Scale(8), current ? theme.selectionInactive : theme.headerHot);
+        if (current) {
+            const int mid = (pill.top + pill.bottom) / 2;
+            RoundFill(dc, {pill.left, mid - Scale(8), pill.left + Scale(3), mid + Scale(8)}, Scale(3), theme.accentText);
         }
+
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, theme.text);
+        HGDIOBJ oldFont = SelectObject(dc, g.chrome.glyphs);
+        RECT glyph = {pill.left + Scale(10), pill.top, pill.left + Scale(36), pill.bottom};
+        DrawTextW(dc, kNav[i].glyph, -1, &glyph, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        SelectObject(dc, g.chrome.font);
+        RECT label = {pill.left + Scale(46), pill.top, pill.right, pill.bottom};
+        DrawTextW(dc, kNav[i].label, -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
         SelectObject(dc, oldFont);
         return CDRF_SKIPDEFAULT;
     }
@@ -642,89 +597,63 @@ LRESULT DrawHeader(NMCUSTOMDRAW* cd) {
     }
 }
 
-LRESULT CALLBACK ListSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
-    if (msg == WM_NOTIFY) {
-        auto* h = reinterpret_cast<NMHDR*>(lp);
-        if (h->hwndFrom == ListView_GetHeader(hwnd)) {
-            if (h->code == NM_CUSTOMDRAW) return DrawHeader(reinterpret_cast<NMCUSTOMDRAW*>(lp));
-            if (h->code == NM_RCLICK) {
-                ShowColumnMenu();
-                return TRUE;
-            }
-        }
+void SizeNavRows() {
+    HIMAGELIST rows = ImageList_Create(1, Scale(40), ILC_COLOR32, 1, 0);
+    ListView_SetImageList(g.nav, rows, LVSIL_SMALL);
+    if (g.navRows) ImageList_Destroy(g.navRows);
+    g.navRows = rows;
+}
+
+void CreateNav(HWND parent) {
+    g.nav = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL |
+                                LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
+                            0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kNavId)),
+                            GetModuleHandleW(nullptr), nullptr);
+    ListView_SetExtendedListViewStyle(g.nav, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    LVCOLUMNW c{};
+    c.mask = LVCF_WIDTH;
+    c.cx = Scale(kNavWidth);
+    ListView_InsertColumn(g.nav, 0, &c);
+    for (int i = 0; i < static_cast<int>(Tab::Count); ++i) {
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = i;
+        item.pszText = const_cast<wchar_t*>(kNav[i].label); // for screen readers; drawing is custom
+        ListView_InsertItem(g.nav, &item);
     }
-    return DefSubclassProc(hwnd, msg, wp, lp);
+    SizeNavRows();
 }
 
-LRESULT CALLBACK HeaderSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
-    if (msg == WM_ERASEBKGND) {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        FillHeaderRect(reinterpret_cast<HDC>(wp), rc, g.theme.headerBackground);
-        return 1;
-    }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
-
-void FocusList() {
-    SetFocus(g.list);
-    if (!g.view.empty() && ListView_GetSelectedCount(g.list) == 0)
-        ListView_SetItemState(g.list, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-}
-
-// Esc clears the filter (then leaves it); Down, Enter and Tab hand the keyboard to the grid.
-LRESULT CALLBACK FilterSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
-    if (msg == WM_KEYDOWN) {
-        if (wp == VK_ESCAPE) {
-            if (GetWindowTextLengthW(hwnd) > 0) SetWindowTextW(hwnd, L"");
-            else FocusList();
-            return 0;
-        }
-        if (wp == VK_DOWN || wp == VK_RETURN || wp == VK_TAB) {
-            FocusList();
-            return 0;
-        }
-    } else if (msg == WM_CHAR && (wp == VK_ESCAPE || wp == VK_RETURN || wp == VK_TAB)) {
-        return 0; // already handled on key down; this only stops the beep
-    }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
-
-void OnFilterChanged() {
-    GetWindowTextW(g.filter, g.filterText, static_cast<int>(std::size(g.filterText)));
-    ApplyView();
-}
+// ---- layout, fonts, theme --------------------------------------------------------------------------
 
 void Layout() {
     RECT rc{};
     GetClientRect(g.hwnd, &rc);
     const int pad = Scale(8);
-    const int editHeight = g.fontHeight + Scale(10);
+    const int nav = Scale(kNavWidth) + Scale(8);
+    const int editHeight = g.chrome.fontHeight + Scale(10);
     const int bar = editHeight + 2 * pad;
-    SetWindowPos(g.filter, nullptr, pad, pad, std::max(0, std::min(Scale(360), static_cast<int>(rc.right) - 2 * pad)),
-                 editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(g.list, nullptr, 0, bar, rc.right, std::max(0, static_cast<int>(rc.bottom) - bar),
+    const int width = std::max(0, static_cast<int>(rc.right) - nav);
+    SetWindowPos(g.nav, nullptr, 0, bar, nav, std::max(0, static_cast<int>(rc.bottom) - bar), SWP_NOZORDER | SWP_NOACTIVATE);
+    ListView_SetColumnWidth(g.nav, 0, nav); // no column edge, so no separator line inside the nav
+    SetWindowPos(g.filter, nullptr, nav + pad, pad, std::max(0, std::min(Scale(360), width - 2 * pad)), editHeight,
                  SWP_NOZORDER | SWP_NOACTIVATE);
+    for (HWND grid : {g.list, g.processes.grid()})
+        if (grid)
+            SetWindowPos(grid, nullptr, nav, bar, width, std::max(0, static_cast<int>(rc.bottom) - bar),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-void RecreateFont() {
-    NONCLIENTMETRICSW ncm{};
-    ncm.cbSize = sizeof ncm;
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, g.dpi);
-    HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
-
-    HDC dc = GetDC(g.hwnd);
-    HGDIOBJ old = SelectObject(dc, font);
-    TEXTMETRICW tm{};
-    if (GetTextMetricsW(dc, &tm)) g.fontHeight = tm.tmHeight;
-    SelectObject(dc, old);
-    ReleaseDC(g.hwnd, dc);
-
-    for (HWND child : {g.list, g.filter})
-        if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+void SetControlFonts() {
+    for (HWND child : {g.list, g.processes.grid(), g.filter, g.nav})
+        if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(g.chrome.font), TRUE);
     if (g.filter) SendMessageW(g.filter, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(Scale(4), Scale(4)));
-    if (g.font) DeleteObject(g.font);
-    g.font = font;
+}
+
+void RecreateFonts() {
+    g.chrome.recreateFonts(g.hwnd);
+    SetControlFonts();
 }
 
 void ReplaceBrush(HBRUSH& brush, COLORREF color) {
@@ -734,67 +663,80 @@ void ReplaceBrush(HBRUSH& brush, COLORREF color) {
 }
 
 void ApplyTheme() {
-    g.theme = lask::ReadTheme();
-    lask::SetAppDarkMode(g.theme.dark);
-    lask::ApplyWindowTheme(g.hwnd, g.theme);
+    lask::Theme& theme = g.chrome.theme;
+    theme = lask::ReadTheme();
+    lask::SetAppDarkMode(theme.dark);
+    lask::ApplyWindowTheme(g.hwnd, theme);
 
-    // ItemsView is the theme Explorer's own list uses: dark scrollbars and hover. No visual styles at
-    // all in high contrast, where the system colors must win.
-    const wchar_t* listTheme = g.theme.highContrast ? L"" : (g.theme.dark ? L"DarkMode_ItemsView" : L"ItemsView");
-    lask::AllowDarkModeForWindow(g.list, g.theme.dark);
-    SetWindowTheme(g.list, listTheme, nullptr);
-    ListView_SetBkColor(g.list, g.theme.surface);
-    ListView_SetTextBkColor(g.list, g.theme.surface);
-    ListView_SetTextColor(g.list, g.theme.text);
+    if (g.list) lask::ApplyGridTheme(g.list, theme);
+    lask::ApplyGridTheme(g.processes.grid(), theme);
+    lask::ApplyGridTheme(g.nav, theme);
+    ListView_SetBkColor(g.nav, theme.background);
 
-    lask::AllowDarkModeForWindow(g.filter, g.theme.dark);
-    SetWindowTheme(g.filter, g.theme.dark ? L"DarkMode_CFD" : L"CFD", nullptr);
+    lask::AllowDarkModeForWindow(g.filter, theme.dark);
+    SetWindowTheme(g.filter, theme.dark ? L"DarkMode_CFD" : L"CFD", nullptr);
 
-    ReplaceBrush(g.surface, g.theme.surface);
-    ReplaceBrush(g.background, g.theme.background);
+    ReplaceBrush(g.surface, theme.surface);
+    ReplaceBrush(g.background, theme.background);
     SetClassLongPtrW(g.hwnd, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(g.background));
 
     RedrawWindow(g.hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
 }
 
-void CreateControls(HWND parent) {
-    HINSTANCE instance = GetModuleHandleW(nullptr);
-    g.filter = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0,
-                               0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFilterId)), instance,
-                               nullptr);
-    Edit_SetCueBannerTextFocused(g.filter, L"Filter: name, PID, user, description  (Ctrl+F)", TRUE);
-    SetWindowSubclass(g.filter, FilterSubclassProc, 1, 0);
+void SetGridImages() {
+    if (g.list) ListView_SetImageList(g.list, g.facts.images(), LVSIL_SMALL);
+    ListView_SetImageList(g.processes.grid(), g.facts.images(), LVSIL_SMALL);
+}
 
-    g.list = CreateWindowExW(0, WC_LISTVIEWW, L"",
-                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL |
-                                 LVS_SHOWSELALWAYS | LVS_SHAREIMAGELISTS,
-                             0, 0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kListId)), instance,
-                             nullptr);
-    ListView_SetExtendedListViewStyle(g.list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP |
-                                                  LVS_EX_LABELTIP);
+void CreateControls(HWND parent) {
+    g.chrome.recreateFonts(parent);
+    g.facts.createImages(g.chrome.dpi);
+
+    g.filter = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0,
+                               0, 0, 0, parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kFilterId)),
+                               GetModuleHandleW(nullptr), nullptr);
+    Edit_SetCueBannerTextFocused(g.filter, L"Filter: name, PID, user, description  (Ctrl+F)", TRUE);
+
     for (int i = 0; i < Index(Column::Count); ++i) {
         g.columnWidth[i] = kColumns[i].width;
         g.columnVisible[i] = kColumns[i].visible;
-        if (g.columnVisible[i]) AppendColumn(static_cast<Column>(i));
     }
-    HWND header = ListView_GetHeader(g.list);
-    SetWindowLongPtrW(header, GWL_STYLE, GetWindowLongPtrW(header, GWL_STYLE) | HDS_HOTTRACK);
-    SetWindowSubclass(g.list, ListSubclassProc, 1, 0);
-    SetWindowSubclass(header, HeaderSubclassProc, 1, 0);
-    CreateImageList();
-    RecreateFont();
+    g.processes.create(parent, kProcessesId);
+    CreateNav(parent);
+    SetGridImages();
+    SetControlFonts();
     ApplyTheme();
+}
+
+// Every ListView costs several milliseconds to create, and the app opens on the Processes tab, so
+// the Details grid waits until it is first shown.
+void EnsureDetails() {
+    if (g.list) return;
+    g.list = lask::CreateGrid(g.hwnd, kListId, g.chrome);
+    for (int i = 0; i < Index(Column::Count); ++i)
+        if (g.columnVisible[i]) AppendColumn(static_cast<Column>(i));
+    lask::ApplyGridTheme(g.list, g.chrome.theme);
+    SetGridImages();
     UpdateSortArrows();
+    Layout();
+    ApplyDetails();
+}
+
+void RescaleColumns(HWND grid, UINT from, UINT to) {
+    if (!grid) return;
+    const int n = Header_GetItemCount(ListView_GetHeader(grid));
+    for (int i = 0; i < n; ++i)
+        ListView_SetColumnWidth(grid, i, MulDiv(ListView_GetColumnWidth(grid, i), static_cast<int>(to), static_cast<int>(from)));
 }
 
 void OnDpiChanged(UINT dpi, const RECT& suggested) {
-    const UINT old = g.dpi;
-    g.dpi = dpi;
-    for (int i = 0, n = ColumnCount(); i < n; ++i)
-        ListView_SetColumnWidth(g.list, i, MulDiv(ListView_GetColumnWidth(g.list, i), static_cast<int>(dpi),
-                                                  static_cast<int>(old)));
-    RecreateFont();
-    CreateImageList();
+    const UINT old = g.chrome.dpi;
+    g.chrome.dpi = dpi;
+    RescaleColumns(g.list, old, dpi);
+    RescaleColumns(g.processes.grid(), old, dpi);
+    RecreateFonts();
+    SizeNavRows();
+    if (g.facts.createImages(dpi)) SetGridImages();
     SetWindowPos(g.hwnd, nullptr, suggested.left, suggested.top, suggested.right - suggested.left,
                  suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
     PublishWanted(); // carries the new icon size
@@ -818,25 +760,93 @@ void RestartElevated(uint32_t killPid, int64_t killCreateTime) {
     if (ShellExecuteExW(&sei)) PostMessageW(g.hwnd, WM_CLOSE, 0, 0); // hand over to the elevated instance
 }
 
+std::optional<lask::ActionTarget> SelectedTarget() {
+    if (g.tab == Tab::Processes) return g.processes.selection();
+    const auto id = SelectedIdentity();
+    if (!id) return std::nullopt;
+    return lask::ActionTarget{*id, {*id}, nullptr};
+}
+
+bool IsCritical(uint32_t pid) {
+    return pid == 0 || pid == 4; // Idle and System cannot be ended; don't try
+}
+
+void PostKillResult(HWND hwnd, uint32_t pid, int64_t createTime, DWORD error) {
+    auto* result = new KillResult{pid, createTime, error};
+    if (!PostMessageW(hwnd, kMsgKillDone, 0, reinterpret_cast<LPARAM>(result))) delete result;
+}
+
+// End task: every process the selected row stands for (an app row ends all of its processes).
 void EndSelectedTask() {
-    const auto selected = SelectedIdentity();
-    if (!selected) return;
-    if (selected->pid == 0 || selected->pid == 4) {
+    auto target = SelectedTarget();
+    if (!target) return;
+    std::erase_if(target->all, [](const lask::Identity& id) { return IsCritical(id.pid); });
+    if (target->all.empty()) {
         MessageBeep(MB_ICONWARNING);
         return;
     }
-    const lask::Identity id = *selected;
     HWND hwnd = g.hwnd;
-    std::thread([id, hwnd] {
-        auto* result = new KillResult{id.pid, id.createTime, lask::TerminateProcessByIdentity(id.pid, id.createTime)};
-        if (!PostMessageW(hwnd, kMsgKillDone, 0, reinterpret_cast<LPARAM>(result))) delete result;
+    std::thread([ids = std::move(target->all), hwnd] {
+        for (const lask::Identity& id : ids) {
+            const DWORD error = lask::TerminateProcessByIdentity(id.pid, id.createTime);
+            if (error != ERROR_SUCCESS && error != ERROR_NOT_FOUND) return PostKillResult(hwnd, id.pid, id.createTime, error);
+        }
+        PostKillResult(hwnd, ids.front().pid, ids.front().createTime, ERROR_SUCCESS);
     }).detach();
+}
+
+void EndSelectedTree() {
+    const auto target = SelectedTarget();
+    if (!target || !g.current) return;
+    if (IsCritical(target->process.pid)) {
+        MessageBeep(MB_ICONWARNING);
+        return;
+    }
+    HWND hwnd = g.hwnd;
+    std::thread([snapshot = g.current, root = target->process, hwnd] {
+        lask::Identity failed = root;
+        const DWORD error = lask::TerminateTree(*snapshot, root, failed);
+        PostKillResult(hwnd, failed.pid, failed.createTime, error);
+    }).detach();
+}
+
+// Explorer can take its time (network drives, shell extensions), so this runs on its own thread.
+void OpenFileLocation() {
+    const auto target = SelectedTarget();
+    if (!target) return;
+    const lask::FactEntry* entry = g.facts.find(target->process);
+    std::wstring path = entry ? entry->facts->path : std::wstring();
+    std::thread([path = std::move(path), id = target->process]() mutable {
+        if (path.empty()) {
+            if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, id.pid)) {
+                wchar_t buffer[MAX_PATH * 4];
+                DWORD size = static_cast<DWORD>(std::size(buffer));
+                if (QueryFullProcessImageNameW(h, 0, buffer, &size)) path.assign(buffer, size);
+                CloseHandle(h);
+            }
+        }
+        if (path.empty() || path.starts_with(L"\\\\?\\GLOBALROOT")) {
+            MessageBeep(MB_ICONWARNING);
+            return;
+        }
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        const std::wstring args = L"/select,\"" + path + L"\"";
+        ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
+        if (SUCCEEDED(com)) CoUninitialize();
+    }).detach();
+}
+
+void GoToDetails() {
+    const auto target = SelectedTarget();
+    if (!target) return;
+    ShowTab(Tab::Details);
+    SelectInDetails(target->process);
 }
 
 void OnKillDone(KillResult* result) {
     std::unique_ptr<KillResult> r(result);
     if (r->error == ERROR_SUCCESS || r->error == ERROR_NOT_FOUND) {
-        g.sampler.requestNow(); // the row disappears with the next snapshot
+        g.sampler.requestNow(); // the rows disappear with the next snapshot
         return;
     }
     if (r->error == ERROR_ACCESS_DENIED && !g.elevated) {
@@ -855,18 +865,27 @@ void OnKillDone(KillResult* result) {
     MessageBoxW(g.hwnd, message, L"Lask Manager", MB_OK | MB_ICONERROR);
 }
 
-void ShowContextMenu(LPARAM lp) {
+void ShowContextMenu(HWND grid, LPARAM lp) {
     POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
     if (pt.x == -1 && pt.y == -1) { // keyboard: anchor on the selected row
-        const int i = ListView_GetNextItem(g.list, -1, LVNI_SELECTED);
+        const int i = ListView_GetNextItem(grid, -1, LVNI_SELECTED);
         RECT rc{};
-        if (i >= 0 && ListView_GetItemRect(g.list, i, &rc, LVIR_LABEL)) pt = {rc.left + Scale(8), rc.bottom};
-        ClientToScreen(g.list, &pt);
+        if (i >= 0 && ListView_GetItemRect(grid, i, &rc, LVIR_LABEL)) pt = {rc.left + Scale(8), rc.bottom};
+        ClientToScreen(grid, &pt);
     }
-    const bool hasSelection = ListView_GetSelectedCount(g.list) > 0;
+    const auto target = SelectedTarget();
+    const UINT enabled = target ? 0 : MF_GRAYED;
 
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), kCmdEndTask, L"&End task\tDel");
+    if (target && target->window) {
+        AppendMenuW(menu, MF_STRING, kCmdSwitchTo, L"&Switch to");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    AppendMenuW(menu, MF_STRING | enabled, kCmdEndTask, L"&End task\tDel");
+    AppendMenuW(menu, MF_STRING | enabled, kCmdEndTree, L"End process &tree");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | enabled, kCmdOpenLocation, L"&Open file location");
+    if (g.tab == Tab::Processes) AppendMenuW(menu, MF_STRING | enabled, kCmdGoToDetails, L"&Go to details");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdRefresh, L"&Refresh now\tF5");
     AppendMenuW(menu, MF_STRING, kCmdFind, L"&Filter\tCtrl+F");
@@ -878,9 +897,75 @@ void ShowContextMenu(LPARAM lp) {
     DestroyMenu(menu);
 }
 
+// ---- keyboard, filter ----------------------------------------------------------------------------
+
+void FocusGrid() {
+    HWND grid = ActiveGrid();
+    SetFocus(grid);
+    if (ListView_GetItemCount(grid) > 0 && ListView_GetSelectedCount(grid) == 0)
+        ListView_SetItemState(grid, 0, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+}
+
+// Esc clears the filter (then leaves it); Down, Enter and Tab hand the keyboard to the grid.
+LRESULT CALLBACK FilterSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_KEYDOWN) {
+        if (wp == VK_ESCAPE) {
+            if (GetWindowTextLengthW(hwnd) > 0) SetWindowTextW(hwnd, L"");
+            else FocusGrid();
+            return 0;
+        }
+        if (wp == VK_DOWN || wp == VK_RETURN || wp == VK_TAB) {
+            FocusGrid();
+            return 0;
+        }
+    } else if (msg == WM_CHAR && (wp == VK_ESCAPE || wp == VK_RETURN || wp == VK_TAB)) {
+        return 0; // already handled on key down; this only stops the beep
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+void OnFilterChanged() {
+    GetWindowTextW(g.filter, g.filterText, static_cast<int>(std::size(g.filterText)));
+    ApplyDetails();
+    g.processes.refilter();
+    // Show the matches from the top, or the selected row if it survived the filter.
+    for (HWND grid : {g.list, g.processes.grid()}) {
+        if (!grid) continue;
+        const int selected = ListView_GetNextItem(grid, -1, LVNI_SELECTED);
+        if (ListView_GetItemCount(grid) > 0) ListView_EnsureVisible(grid, selected >= 0 ? selected : 0, FALSE);
+    }
+    PublishWanted();
+}
+
+// Keys both grids share. Left, Right and Enter on the Processes tab are the tree's.
+void OnGridKey(WORD key) {
+    switch (key) {
+    case VK_DELETE: EndSelectedTask(); break;
+    case VK_TAB: SetFocus(g.filter); break;
+    case VK_ESCAPE:
+        if (g.filterText[0]) SetWindowTextW(g.filter, L""); // first Esc drops the filter
+        else PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+        break;
+    default: break;
+    }
+}
+
 // ---- window ----------------------------------------------------------------------------------
 
 LRESULT OnNotify(NMHDR* h) {
+    if (h->idFrom == kNavId) {
+        if (h->code == NM_CUSTOMDRAW) return DrawNav(reinterpret_cast<NMLVCUSTOMDRAW*>(h));
+        if (h->code == LVN_ITEMCHANGED) OnNavChanged(reinterpret_cast<NMLISTVIEW*>(h));
+        return 0;
+    }
+    if (h->idFrom == kProcessesId) {
+        switch (h->code) {
+        case LVN_KEYDOWN: OnGridKey(reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey); return 0;
+        case LVN_ODCACHEHINT:
+        case LVN_ENDSCROLL: PublishWantedIfScrolled(); return 0;
+        default: return g.processes.onNotify(h);
+        }
+    }
     if (h->idFrom != kListId) return 0;
     switch (h->code) {
     case LVN_GETDISPINFOW: OnGetDispInfo(reinterpret_cast<NMLVDISPINFOW*>(h)); return 0;
@@ -888,19 +973,38 @@ LRESULT OnNotify(NMHDR* h) {
     case LVN_ODCACHEHINT:
     case LVN_ENDSCROLL: PublishWantedIfScrolled(); return 0;
     case LVN_COLUMNCLICK: OnColumnClick(reinterpret_cast<NMLISTVIEW*>(h)->iSubItem); return 0;
-    case NM_CUSTOMDRAW: return DrawListItem(reinterpret_cast<NMLVCUSTOMDRAW*>(h));
-    case LVN_KEYDOWN:
-        switch (reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey) {
-        case VK_DELETE: EndSelectedTask(); break;
-        case VK_TAB: SetFocus(g.filter); break;
-        case VK_ESCAPE:
-            if (g.filterText[0]) SetWindowTextW(g.filter, L""); // first Esc drops the filter
-            else PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
-            break;
-        default: break;
-        }
-        return 0;
+    case NM_CUSTOMDRAW: return DrawDetailsItem(reinterpret_cast<NMLVCUSTOMDRAW*>(h));
+    case LVN_KEYDOWN: OnGridKey(reinterpret_cast<NMLVKEYDOWN*>(h)->wVKey); return 0;
     default: return 0;
+    }
+}
+
+void OnCommand(WORD id) {
+    switch (id) {
+    case kCmdEndTask: EndSelectedTask(); break;
+    case kCmdEndTree: EndSelectedTree(); break;
+    case kCmdOpenLocation: OpenFileLocation(); break;
+    case kCmdGoToDetails: GoToDetails(); break;
+    case kCmdSwitchTo:
+        if (const auto target = SelectedTarget(); target && target->window) lask::SwitchToWindow(target->window);
+        break;
+    case kCmdRefresh: g.sampler.requestNow(); break;
+    case kCmdFind:
+        SetFocus(g.filter);
+        Edit_SetSel(g.filter, 0, -1);
+        break;
+    case kCmdNextTab:
+        ShowTab(static_cast<Tab>((static_cast<int>(g.tab) + 1) % static_cast<int>(Tab::Count)));
+        break;
+    case kCmdTabProcesses:
+    case kCmdTabDetails:
+        ShowTab(id == kCmdTabProcesses ? Tab::Processes : Tab::Details);
+        break;
+    case kCmdRestartAdmin: RestartElevated(0, 0); break;
+    default:
+        if (id > kCmdColumnBase && id < kCmdColumnBase + Index(Column::Count))
+            ToggleColumn(static_cast<Column>(id - kCmdColumnBase));
+        break;
     }
 }
 
@@ -908,47 +1012,43 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
         g.hwnd = hwnd;
+        // The first snapshot is taken while the window is built; its message is only handled once
+        // the message loop runs, after the empty grid has been painted.
+        g.sampler.start(hwnd, kMsgSnapshot, kDefaultIntervalMs);
         CreateControls(hwnd);
+        SetWindowSubclass(g.filter, FilterSubclassProc, 1, 0);
+        ShowTab(Tab::Processes);
         return 0;
     case WM_SIZE:
-        if (g.list) Layout();
+        if (g.nav) Layout();
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        mmi->ptMinTrackSize = {Scale(480), Scale(320)};
+        mmi->ptMinTrackSize = {Scale(640), Scale(360)};
         return 0;
     }
-    case WM_SETFOCUS: SetFocus(g.list); return 0;
+    case WM_SETFOCUS: SetFocus(ActiveGrid()); return 0;
     case WM_NOTIFY: return OnNotify(reinterpret_cast<NMHDR*>(lp));
+    case lask::kMsgHeaderMenu:
+        if (reinterpret_cast<HWND>(wp) == g.list) ShowColumnMenu();
+        return 0;
     case WM_COMMAND:
         if (LOWORD(wp) == kFilterId) {
             if (HIWORD(wp) == EN_CHANGE) OnFilterChanged();
             return 0;
         }
-        switch (LOWORD(wp)) {
-        case kCmdEndTask: EndSelectedTask(); break;
-        case kCmdRefresh: g.sampler.requestNow(); break;
-        case kCmdFind:
-            SetFocus(g.filter);
-            Edit_SetSel(g.filter, 0, -1);
-            break;
-        case kCmdRestartAdmin: RestartElevated(0, 0); break;
-        default:
-            if (LOWORD(wp) > kCmdColumnBase && LOWORD(wp) < kCmdColumnBase + Index(Column::Count))
-                ToggleColumn(static_cast<Column>(LOWORD(wp) - kCmdColumnBase));
-            break;
-        }
+        OnCommand(LOWORD(wp));
         return 0;
     case WM_CTLCOLOREDIT:
         if (reinterpret_cast<HWND>(lp) == g.filter) {
             HDC dc = reinterpret_cast<HDC>(wp);
-            SetTextColor(dc, g.theme.text);
-            SetBkColor(dc, g.theme.surface);
+            SetTextColor(dc, g.chrome.theme.text);
+            SetBkColor(dc, g.chrome.theme.surface);
             return reinterpret_cast<LRESULT>(g.surface);
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     case WM_CONTEXTMENU:
-        if (reinterpret_cast<HWND>(wp) == g.list) ShowContextMenu(lp);
+        if (reinterpret_cast<HWND>(wp) == ActiveGrid()) ShowContextMenu(ActiveGrid(), lp);
         else return DefWindowProcW(hwnd, msg, wp, lp);
         return 0;
     case kMsgSnapshot: OnSnapshot(); return 0;
@@ -963,7 +1063,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SETTINGCHANGE:
         if (lask::IsThemeSettingChange(lp) || wp == SPI_SETHIGHCONTRAST) ApplyTheme();
         if (wp == SPI_SETNONCLIENTMETRICS) {
-            RecreateFont();
+            RecreateFonts();
             Layout();
         }
         return 0;
@@ -1035,10 +1135,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     INITCOMMONCONTROLSEX icc{sizeof icc, ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
 
-    g.dpi = GetDpiForSystem();
-    g.theme = lask::ReadTheme();
-    lask::SetAppDarkMode(g.theme.dark); // before any window exists, so menus pick it up
-    g.background = CreateSolidBrush(g.theme.background);
+    g.chrome.dpi = GetDpiForSystem();
+    g.chrome.theme = lask::ReadTheme();
+    lask::SetAppDarkMode(g.chrome.theme.dark); // before any window exists, so menus pick it up
+    g.background = CreateSolidBrush(g.chrome.theme.background);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof wc;
@@ -1050,18 +1150,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     wc.lpszClassName = L"LaskManager.Main";
     if (!RegisterClassExW(&wc)) return 1;
 
+    // The Processes tab is the first one shown; it wants window titles from the very first tick.
+    g.sampler.setWantWindows(true);
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, g.elevated ? L"Lask Manager (Administrator)" : L"Lask Manager",
-                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, Scale(1000), Scale(640), nullptr,
-                                nullptr, instance, nullptr);
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, Scale(1120),
+                                Scale(680), nullptr, nullptr, instance, nullptr);
     if (!hwnd) return 1;
     ShowWindow(hwnd, showCommand);
-    UpdateWindow(hwnd); // the empty grid is on screen before the first snapshot is even requested
-
-    g.sampler.start(hwnd, kMsgSnapshot, kDefaultIntervalMs);
+    UpdateWindow(hwnd); // the empty grid is on screen before the first snapshot is handled
 
     const ACCEL accelerators[] = {
         {FVIRTKEY | FCONTROL, 'F', kCmdFind},
         {FVIRTKEY, VK_F5, kCmdRefresh},
+        {FVIRTKEY | FCONTROL, VK_TAB, kCmdNextTab},
+        {FVIRTKEY | FCONTROL | FSHIFT, VK_TAB, kCmdNextTab},
+        {FVIRTKEY | FCONTROL, '1', kCmdTabProcesses},
+        {FVIRTKEY | FCONTROL, '2', kCmdTabDetails},
     };
     HACCEL accel = CreateAcceleratorTableW(const_cast<ACCEL*>(accelerators), static_cast<int>(std::size(accelerators)));
 

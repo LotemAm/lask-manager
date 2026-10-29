@@ -44,19 +44,39 @@ struct IdentityHash {
     }
 };
 
+// A top-level window the user would recognise as an app window (what Alt+Tab shows).
+struct WindowInfo {
+    HWND hwnd = nullptr;
+    uint32_t pid = 0;
+    bool hung = false;     // IsHungAppWindow: no message pumped for 5 s
+    wchar_t title[128] = {};
+};
+
 // Immutable once published. The UI keeps the newest and the previous one to compute rates.
 struct Snapshot {
     uint64_t qpc = 0;          // QueryPerformanceCounter at capture
     uint64_t qpcFrequency = 0; // ticks per second
     uint32_t logicalCpus = 0;
+    uint64_t totalPhysical = 0; // bytes of RAM, read once when the sampler starts
+    bool hasWindows = false;    // windows was filled (only while the Processes tab is visible)
     std::vector<ProcessRow> rows;
+    std::vector<WindowInfo> windows;
 
     // Elapsed time since `earlier`, in 100 ns units (the same unit as ProcessRow::cpuTime).
     uint64_t elapsed100ns(const Snapshot& earlier) const;
 };
 
 // Captures one snapshot. `buffer` is kept between calls so it grows once and stays grown.
-bool Capture(std::vector<std::byte>& buffer, Snapshot& out);
+// `windows` adds one EnumWindows pass for app window titles and the hung check.
+bool Capture(std::vector<std::byte>& buffer, Snapshot& out, bool windows);
+
+// Per-row rates between two snapshots, aligned with `current.rows`. A row without a matching
+// identity in `previous` (or without a previous snapshot) gets -1.
+struct RowRates {
+    double cpu = -1.0;             // percent of all logical CPUs
+    double diskBytesPerSec = -1.0; // read + write
+};
+void ComputeRates(const Snapshot& current, const Snapshot* previous, std::vector<RowRates>& out);
 
 // Worker thread that captures a snapshot every interval and posts `message` to `notify`.
 // The UI thread never calls into the kernel; it only reads latest().
@@ -71,6 +91,7 @@ public:
     void stop();
     void setInterval(unsigned intervalMs) { intervalMs_.store(intervalMs, std::memory_order_relaxed); }
     void requestNow(); // take a snapshot as soon as possible (F5, after a kill)
+    void setWantWindows(bool want) { wantWindows_.store(want, std::memory_order_relaxed); }
 
     std::shared_ptr<const Snapshot> latest() const { return latest_.load(std::memory_order_acquire); }
 
@@ -79,15 +100,22 @@ private:
 
     std::atomic<std::shared_ptr<const Snapshot>> latest_;
     std::atomic<unsigned> intervalMs_{1000};
+    std::atomic<bool> wantWindows_{false};
     HANDLE wake_ = nullptr;
     HWND notify_ = nullptr;
     UINT message_ = 0;
     std::jthread thread_;
 };
 
-// Opens `pid`, verifies its creation time still matches (PIDs get recycled), terminates it.
-// Returns 0 on success, ERROR_NOT_FOUND if the identity no longer matches, else a Win32 error.
-DWORD TerminateProcessByIdentity(uint32_t pid, int64_t createTime);
+// Opens `pid`, verifies its creation time still matches (PIDs get recycled), terminates it, and
+// waits up to `waitMs` for it to be gone. Returns 0 on success, ERROR_NOT_FOUND if the identity no
+// longer matches, else a Win32 error.
+DWORD TerminateProcessByIdentity(uint32_t pid, int64_t createTime, DWORD waitMs = 0);
+
+// Ends `root` and its descendants in `snapshot`, leaves first, two seconds at most per process.
+// A child counts only if it was created after its parent (a recycled parent PID is not a parent).
+// Returns 0 or the first failure, with the process that failed in `failed`.
+DWORD TerminateTree(const Snapshot& snapshot, Identity root, Identity& failed);
 
 bool IsElevated();
 bool EnableDebugPrivilege(); // only succeeds when elevated; lets us end other users' processes
