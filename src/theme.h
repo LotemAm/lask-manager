@@ -27,9 +27,15 @@ struct Theme {
     COLORREF headerBackground = 0;
     COLORREF headerHot = 0;
     COLORREF headerPressed = 0;
-    COLORREF graphLine = 0;
-    COLORREF graphFill = 0;
-    COLORREF graphGrid = 0;       // the faint grid behind a graph
+    // One palette per Performance panel kind, indexed by PanelKind (CPU, Memory, Disk, Network, GPU).
+    // All the same in high contrast.
+    static constexpr int kGraphKinds = 5;
+    struct GraphColors {
+        COLORREF line = 0;
+        COLORREF fill = 0;
+        COLORREF grid = 0; // the faint grid behind a graph
+    };
+    GraphColors graph[kGraphKinds] = {};
     COLORREF warning = 0;
     COLORREF good = 0;            // a running service's status dot
     // Heat-map cell backgrounds on the Processes tab, from barely busy (0) to very busy (last).

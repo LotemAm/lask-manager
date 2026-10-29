@@ -207,12 +207,15 @@ void PerformanceTab::graphsReset() {
     for (Graph& g : graphs_) g.reset();
 }
 
+static_assert(static_cast<int>(PanelKind::Gpu) + 1 == Theme::kGraphKinds, "one graph palette per PanelKind");
+
 void PerformanceTab::updateGraphs() {
     const Panel* p = selected();
     const Machine* m = model_.machine();
     GraphData a, b;
     const int samples_ = samples();
     a.samples = b.samples = samples_;
+    if (p) a.palette = b.palette = static_cast<int>(p->kind);
     a.bottomLeft = b.bottomLeft = RangeLabel(seconds_);
     a.bottomRight = b.bottomRight = L"0";
     int count = 1;
@@ -398,6 +401,7 @@ std::vector<std::pair<std::wstring, std::wstring>> PerformanceTab::stats(const P
 
 void PerformanceTab::drawSparkline(HDC dc, const RECT& box, const Panel& p) const {
     const Theme& theme = chrome_.theme;
+    const Theme::GraphColors& colors = theme.graph[static_cast<int>(p.kind)];
     FillSolid(dc, box, theme.surface);
     const Machine* m = model_.machine();
     const Ring& ring = p.kind == PanelKind::Network ? p.b : p.a;
@@ -417,17 +421,17 @@ void PerformanceTab::drawSparkline(HDC dc, const RECT& box, const Panel& p) cons
         }
         points[n] = {box.right - 1, box.bottom - 1};
         points[n + 1] = {points[0].x, box.bottom - 1};
-        SetDCBrushColor(dc, theme.graphFill);
+        SetDCBrushColor(dc, colors.fill);
         HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
         HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
         Polygon(dc, points, n + 2);
-        SetDCPenColor(dc, theme.graphLine);
+        SetDCPenColor(dc, colors.line);
         SelectObject(dc, GetStockObject(DC_PEN));
         Polyline(dc, points, n);
         SelectObject(dc, oldBrush);
         SelectObject(dc, oldPen);
     }
-    SetDCBrushColor(dc, theme.graphLine);
+    SetDCBrushColor(dc, colors.line);
     FrameRect(dc, &box, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
 
